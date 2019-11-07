@@ -5,7 +5,7 @@ import cmd
 #from jsonrpclib import Server 
 import csv
 from ConfigParser import SafeConfigParser
-from collections import OrderedDict
+from collections import defaultdict
 import urllib3
 import cvp
 import re
@@ -13,7 +13,6 @@ from ipaddress import ip_address
 import os, ssl
 import sys
 import datetime
-from macresource import need
 
 #need this to avoid ssl invalid cert bypass (at least on my mac it failed, pyeapi)
 #only other way is to set env vars or modify .conf in /etc
@@ -23,15 +22,14 @@ from macresource import need
 #   ssl._create_default_https_context = ssl._create_unverified_context
 #===============================================================================
 
-
 LOGGER = None
 CVP = None
 CONFIG = {}
 TEMPLATES = {}
 DEVICES = {}
 HOST_TO_SN = {}
+SUPPLEMENT_FILES = {}
 SPINES = []
-
 
 
 class Log():
@@ -43,7 +41,6 @@ class Log():
         sys.stderr.write(string)
         self.fabric_builder_log.write(string)
         
-
 class Cvp():
     def __init__(self):
         try:
@@ -86,10 +83,11 @@ class Task():
 
 class Switch():
     
-    def __init__(self, params={}, cvpDevice=None):
+    def __init__(self, params={}, cvpDevice=None, injectSection = None):
         #list to hold leaf compiled spine underlay interface init
         self.underlay_inject = []
         self.to_deploy = []
+        self.injectSection = injectSection
         for k, v in params.items():
             setattr(self, k, v.replace("|",","))
             
@@ -98,6 +96,9 @@ class Switch():
             LOGGER.log("Device init {0}, Role: {1}, CVP found: ({2})".format(self.sn, self.role, 'x'))
         else:
             LOGGER.log("Device init {0}, Role: {1}, CVP found: ({2})".format(self.sn, self.role, ''))
+    
+    def searchConfig(self, key):
+        return searchConfig(key, self.injectSection)
             
     def assign_configlet(self, template):
         #TODO: MAKE HANDLE LIST LOOKUPS, RIGHT NOW ONLY WORKS FOR ONE CONTAINER OR ONE DEVICE i.e. USELESS
@@ -114,10 +115,10 @@ class Switch():
         #TODO: MAKE HANDLE LIST LOOKUPS, RIGHT NOW ONLY WORKS FOR ONE CONTAINER OR ONE DEVICE i.e. USELESS
         exception = getattr(template, "skip_container", None)
         if exception == self.role:
-            return " "
+            return ' '
         exception = getattr(template, "skip_device", None)
         if exception == self.sn:
-            return " "
+            return ' '
         return template.compile(self)    
     
     @property
@@ -130,7 +131,7 @@ class Switch():
             neighbor = DEVICES[HOST_TO_SN[self.mlag_neighbor]]
             mgmt_ip = ip_address(unicode(self.mgmt_ip))
             neighbor_mgmt = ip_address(unicode(neighbor.mgmt_ip))
-            global_mlag_address = ip_address(unicode(searchConfig('mlag_address')))
+            global_mlag_address = ip_address(unicode(self.searchConfig('mlag_address')))
             if mgmt_ip > neighbor_mgmt:
                 return global_mlag_address + 1
             else:
@@ -149,16 +150,16 @@ class Switch():
     @property
     def reload_delay_0(self):
         if getattr(self, "is_jericho", None):
-            return searchConfig('reload_delay_jericho')[0]
+            return self.searchConfig('reload_delay_jericho')[0]
         else:
-            return searchConfig('reload_delay')[0]
+            return self.searchConfig('reload_delay')[0]
         
     @property
     def reload_delay_1(self):
         if getattr(self, "is_jericho", None):
-            return searchConfig('reload_delay_jericho')[1]
+            return self.searchConfig('reload_delay_jericho')[1]
         else:
-            return searchConfig('reload_delay')[1]
+            return self.searchConfig('reload_delay')[1]
     
     @property
     def underlay_bgp(self):
@@ -177,28 +178,23 @@ class Switch():
                 spine_args = {
                     "interface" : getattr(self, "sp{0}_int".format(i)),
                     "address" : ipAddress,
-                    "interface_speed" : getattr(self, "sp{0}_speed".format(i), searchConfig('fabric_speed')),
-                    "description" : "TO-{0}-FABRIC".format(self.hostname)
+                    "interface_speed" : getattr(self, "sp{0}_speed".format(i), self.searchConfig('fabric_speed')),
+                    "description" : "TO-{0}-UNDERLAY".format(self.hostname)
                 }
                 spine.underlay_inject.append(template.compile(spine_args))
                 self_args = {
                     "interface" : getattr(self, "lf{0}_int".format(i)),
                     "address" : ipAddress + 1,
-                    "interface_speed" : getattr(self, "sp{0}_speed".format(i), searchConfig('fabric_speed')),
-                    "description" : "TO-{0}-FABRIC".format(spine.hostname)
+                    "interface_speed" : getattr(self, "sp{0}_speed".format(i), self.searchConfig('fabric_speed')),
+                    "description" : "TO-{0}-UNDERLAY".format(spine.hostname)
                 }
                 self.underlay_inject.append(template.compile(self_args))
                 
             except Exception as e:
-                LOGGER.log("Error building configlet underlay for {0}<->{1}: {2}".format(spine.hostname, self.hostname, e))
+                LOGGER.log("Error building configlet section underlay for {0}<->{1}: {2}".format(spine.hostname, self.hostname, e))
                 sys.exit(0)
             
         return "\n".join(self.underlay_inject)
-    
-    @property
-    def vrf_definition_bgp(self):
-        template = TEMPLATES.get('vrf_definition_bgp')
-        return self.compile_configlet(template)
 
     @property
     def spine_asn(self):
@@ -206,40 +202,33 @@ class Switch():
             return SPINES[0].asn
         else:
             return None
-        
-    @property
-    def spine_peer_filter(self):
-        if self.role == 'spine':
-            if ASN_RANGE.find(',') == -1:
-                asn_range = "10 match as-range {0} result accept".format(ASN_RANGE)
-            else:
-                priority = 10
-                asn_range = ""
-                for _asn in ASN_RANGE.split(','):
-                    asn_range = asn_range + "\t{0} match as-range {1} result accept\n".format(priority, _asn)
-                    priority += 10
+
           
-        
+    @property
+    def spine_lo0_list(self):
+        return [spine.lo0 for spine in SPINES]
+    
+    @property
+    def spine_ipv4_list(self):
+        ipAddresses = []
+        for i, spine in enumerate(SPINES, start = 1):
+            #compile p2p link to spine
+            ipAddresses.append(getattr(self, "sp{0}_ip".format(i)))
+        return ipAddresses
+    
+    @property
+    def spine_hostname_list(self):
+        return [spine.hostname for spine in SPINES]
+    
+    @property
+    def ibgp_peer_address(self):
+        return ip_address(unicode(self.searchConfig('ibgp_ip'))) + 1
+            
 class Manager():
     
     def __init__(self):
-        global DEVICES
-        global SPINES
-        global HOST_TO_SN
         self.tasks_to_deploy = []
-        with open("fabric_parameters.csv") as f:
-            reader = csv.reader(f)
-            headers = [header.lower() for header in next(reader)]
-            #row[0] is the serial
-            #passing a dict to the switch to preserve csv headers
-            for row in reader:
-                sn = row[0]
-                role_index = headers.index("role")
-                
-                DEVICES[sn] = Switch(dict(zip(headers,row)), CVP.getBySerial(sn))
-                HOST_TO_SN[DEVICES[sn].hostname] = sn
-                if row[role_index].lower() == "spine": #and (searchConfig('spines'] and searchConfig('spines'].index(sn)):
-                    SPINES.append(DEVICES[sn])
+        
     
     def deploy(self, recipe):
         for sn, device in DEVICES.items():
@@ -268,6 +257,7 @@ def searchSource(key, source):
 
 def searchConfig(key, section = None):
     config = None
+        
     if section:
         try:
             config = CONFIG.get(section, key)
@@ -284,7 +274,43 @@ def searchConfig(key, section = None):
     return config
 
 def getKeyDefinition(key, source, section = None):
-    return searchSource(key, source) or searchConfig(key, section)
+    
+    csv_source = key.split('#')
+    found = None
+    math = re.findall('(\w+)([+-/*]+)(\d+)?', key)   
+    
+    if len(csv_source) == 2:
+        file = csv_source[0]
+        _key = csv_source[1]
+        math = re.findall('(\w+)([+-/*]+)(\d+)?', _key)
+        _key = math[0][0] if math else _key
+        global SUPPLEMENT_FILES
+        try:
+            found = SUPPLEMENT_FILES[file][_key]
+        except KeyError:
+            with open(file+'.csv') as f:
+                
+                SUPPLEMENT_FILES[file] = defaultdict(list)
+                reader = csv.DictReader(f)
+                for row in reader:
+                    for k, v in row.items():
+                        SUPPLEMENT_FILES[file][k].append(v)
+            found = SUPPLEMENT_FILES[file][_key]
+            
+         
+    key, op, qty = (found or key,) + math[0][1:] if math else (found or key, None, None)
+    
+    if op:
+        if type(key) == list:
+            return (key, op, qty)
+        elif key.isdigit():
+            return (int(key), op, qty)
+        else:
+            return (int(searchSource(key, source) or searchConfig(key, section)), op, qty)
+        
+        
+
+    return found or searchSource(key, source) or searchConfig(key, section)
 
 def parseForRequiredKeys(template):
     return re.findall('{(.*?)}', template)
@@ -295,11 +321,9 @@ def parseForIterables(template):
 def parseForSections(template):
     return re.findall('(@[\s\S]*?@)({.*?})*', template)
 
-#this should never fail
-def parseSectionDefinition(template):
-    return re.findall('(?<=@)[\s\S]*?(?=@))', template)[0]
-
-def parseCondition(keys):
+#builds a tuple of values followed by a comparator lambda
+#used to check if tests pass while supporting section injections from the global variable space
+def buildConditionTest(keys):
     condition_list = []
     _keys = keys.split('|')
     for key in _keys:
@@ -319,9 +343,9 @@ def buildValueDict(source, template, injectSection = None):
     valueDict = {}
     valueDict['error'] = []
     
-    neededKeys = parseForRequiredKeys(template)
+    keys = parseForRequiredKeys(template)
     
-    for key in neededKeys:
+    for key in keys:
         #check if dict already has defined
         if valueDict.get(key, None):
             continue
@@ -331,12 +355,50 @@ def buildValueDict(source, template, injectSection = None):
             valueDict['error'].append(key)
         else:
             valueDict[key] = defined
-        
     return valueDict
 
 def getBySerial(sn):
     return DEVICES[sn]
 
+class Math():
+    def __init__(self, start, op, qty):
+        
+        self.iter = None
+        self.counter = None
+        
+        
+        if type(start) == list:
+            self.iter = iter(start)
+        else:  
+            self.counter = int(start)
+
+        
+        if op == '+':
+            self.do = self.increment
+            self.qty = int(qty) if qty else 1
+        elif op == '++':
+            self.do = self.increment
+            self.qty = int(qty) if qty else 10
+        elif op == '*':
+            self.do = self.multiply
+            self.qty = int(qty) if qty else 1
+    
+    def current(self):
+        return int(next(self.iter)) if self.iter else self.counter
+    
+    def store(self):
+        if self.counter:
+            self.counter += self.qty
+    
+    def increment(self):
+        current = self.current()
+        self.store()
+        return current
+    
+    def multiply(self):
+        current = self.current()
+        return current * self.qty
+        
 class Configlet():
     def __init__(self, name, params = {}, injectSection = None):        
         self.name = name
@@ -350,6 +412,7 @@ class Configlet():
         compiled = {}
         compiled['error'] = []
         iterables = parseForIterables(baseTemplate)
+        
         for template in iterables:
             extractedTemplates = [v.strip('[]') for v in template.split('else')]
             for i, _template in enumerate(extractedTemplates):
@@ -361,28 +424,31 @@ class Configlet():
                     values_list = valueDict.values()
                     
                     #basically turn lists into iterables and static values into functions which return the same thing everytime
-                    #this way we can exhause iterators until they fail as we build new dicts to pass as single values
+                    #this way we can exhause iterators until they fail as we build new dicts to pass as args
                     #if the flag is never set i.e. no lists are found just return one
                     values_and_getters = []
                     _compiled = []
                     flag = False
-                    for item in values_list:
+                    for item in values_list: 
                         if type(item) == list:
                             #found at least one list
                             flag = not flag if not flag else flag
-                            #i = element in lists to iterate
-                            values_and_getters.append((iter(item),lambda item:next(item)))
+                            values_and_getters.append((iter(item), lambda item:next(item)))
+                        elif type(item) == tuple:
+                            values_and_getters.append((Math(*item), lambda item:item.do()))
                         else:
                             values_and_getters.append((item, lambda item:item))
                     #exhaust iterators
                     try:
                         while flag:
+
                             _compiled.append(_template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters]))))
-                            
+                        else:
+                            #no lists were found return once
+                            compiled[template] = _template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters])))    
                     except StopIteration:
                         compiled[template] = '\n'.join(_compiled)
-                    #no lists were found return once
-                    compiled[template] =  _template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters])))
+                    
                     if i == 0:
                         break
                     if i == 1:
@@ -408,25 +474,28 @@ class Configlet():
             compiledIterables = self.compileIterables(source, __section)
             errorIterables = compiledIterables.pop('error')
             #test the "tests" arguments i.e @...@{tests}
-            failedTests = [v[0] for v, fn in parseCondition(_test.strip('{}')) if not fn(*v, source = source, section = self.injectSection)]
+            #parseCondition returns a (value, function) tuple the fn(value) will return true/false if the test passes
+            #here we collect the key which failed a test
+            failedTests = [v[0] for v, fn in buildConditionTest(_test.strip('{}')) if not fn(*v, source = source, section = self.injectSection)]
             
             if _test and not (failedTests or errorIterables):
-                #there is a test and all passed COMPILE
+                #there is a test and iterables with no errors -> COMPILE
                 for toReplace, compiled in compiledIterables.items():
-                    __section = __section.replace(toReplace, compiled)           
+                    __section = __section.replace(toReplace, compiled)        
             elif _test and failedTests:
                 #there is a test but failed WIPE
-                LOGGER.log("Error building configlet section {0} in {1}: test condition for {2} failed ".format(
+                LOGGER.log("Error building configlet section {0} in {1}: test condition for {2} failed".format(
                     _section.replace('\n','')[:15],
                     self.name,
                     ','.join(failedTests)
                 ))
                 __section = ''
             elif compiledIterables and not errorIterables:
-                #there is no test, decide with iterables
+                #there is no test, and all iterables passed COMPILE
                 for toReplace, compiled in compiledIterables.items():
-                    __section = __section.replace(toReplace, compiled)  
+                    __section = __section.replace(toReplace, compiled) 
             else:
+                #no test, iterables failed WIPE
                 for toReplace, errorKeys in errorIterables:
                     LOGGER.log("Error building configlet section {0} in {1}: iterations failed on {2}".format(
                         _section.replace('\n','')[:15],
@@ -434,20 +503,25 @@ class Configlet():
                         ','.join(errorKeys)
                     ))
                 __section = ''
-            baseTemplate = baseTemplate.replace(_section + _test, '')
-            
+            baseTemplate = baseTemplate.replace(_section + _test, __section)
+
         #parse stuff in [] for iterations outside of sections
         #support only one iterable for now from the global space
         compiledIterables = self.compileIterables(source, baseTemplate)
         errorIterables = compiledIterables.pop('error')
+        
         for toReplace, compiled in compiledIterables.items():   
             baseTemplate = baseTemplate.replace(toReplace, compiled)  
+            
         for toReplace, errorKeys in errorIterables:
             baseTemplate = baseTemplate.replace(toReplace, '')
             
         #now deal with the base template after sections/iterables are worked out
-        valueDict = buildValueDict(source, baseTemplate, injectSection = self.injectSection)
+        valueDict = buildValueDict(source, baseTemplate, self.injectSection)
         errorKeys = valueDict.pop('error')
+        if errorKeys:
+            LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, ','.join(errorKeys)))
+            return ' '
         try:
             baseTemplate = baseTemplate.format(**valueDict)
         except KeyError as E:
@@ -458,34 +532,55 @@ class Configlet():
 
         return baseTemplate.replace("~","\t").strip()
 
-def parseAgain(injectSection):
+def buildGlobalData(injectSection = None):
     global TEMPLATES
     global CONFIG
+    global DEVICES
+    global SPINES
+    global HOST_TO_SN
+    
+    DEVICES = {}
+    SPINES = []
+    HOST_TO_SN = {}
+    
+    with open("fabric_parameters.csv") as f:
+        reader = csv.reader(f)
+        headers = [header.lower() for header in next(reader)]
+        #row[0] is the serial
+        #passing a dict to the switch to preserve csv headers
+        for row in reader:
+            sn = row[0]
+            role_index = headers.index("role")
+            
+            DEVICES[sn] = Switch(dict(zip(headers,row)), CVP.getBySerial(sn), injectSection)
+            HOST_TO_SN[DEVICES[sn].hostname] = sn
+            if row[role_index].lower() == "spine": #and (searchConfig('spines'] and searchConfig('spines'].index(sn)):
+                SPINES.append(DEVICES[sn])
+                
+    TEMPLATES = {}
     
     #INIT CONFIG
     CONFIG = SafeConfigParser()
-    CONFIG.read('fabric_builder_global.conf')
+    CONFIG.read('global.conf')
     
     #INIT TEMPLATES
     parser = SafeConfigParser()
-    parser.read('fabric_builder_templates.conf')
+    parser.read('templates.conf')
     for sectionName in parser.sections():
         TEMPLATES[sectionName] = Configlet(sectionName, dict(parser.items(sectionName)), injectSection)
        
 class FabricBuilder(cmd.Cmd):
     """Arista Fabric Initializer"""
     
-
-            
     def do_deploy(self, section):
-        parseAgain(section)
+        buildGlobalData(section)
         recipe = searchConfig("recipe", section)
         MANAGER.deploy(recipe)
         
     def do_test(self, line):
-        parseAgain()
-        sn, name = line.split(',')
-        getBySerial(sn).compile_configlet(TEMPLATES[name])
+        args = line.split(',')
+        buildGlobalData(args[2] if 2 < len(args) else None)
+        getBySerial(args[0]).compile_configlet(TEMPLATES[args[1]])
         
     def do_teapi(self,ip):
         #PYEAPI
@@ -500,29 +595,17 @@ class FabricBuilder(cmd.Cmd):
         return True
     
 def main():
-    global TEMPLATES
-    global CONFIG
-    global CVP 
-    global MANAGER 
-    
-    #INIT CONFIG
-    CONFIG = SafeConfigParser()
-    CONFIG.read('fabric_builder_global.conf')
     
     #INIT LOGGER
     global LOGGER
     LOGGER = Log()
-    
-    #INIT TEMPLATES
-    parser = SafeConfigParser()
-    parser.read('fabric_builder_templates.conf')
-    for section in parser.sections():
-        TEMPLATES[section] = Configlet(section, dict(parser.items(section)))
         
     #INIT CVP
+    global CVP
     CVP = Cvp()
     
     #INIT MANAGER
+    global MANAGER 
     MANAGER = Manager()
 
     FabricBuilder().cmdloop()
