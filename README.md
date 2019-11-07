@@ -241,9 +241,10 @@ skip_container = spine
 
 On deployment:
 
+```
 >python builder.py
 >(Cmd) deploy vlan-to-vni
-
+```
 
 Output:
 ```
