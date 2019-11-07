@@ -55,7 +55,7 @@ def spine_hostname_list(self):
 ```
 
 In the backend, all of the variables defined in the CSV become dot-notation class properties automatically.
-Therefore if the CSV contains a header named <hostname>, the corresponding class will have the respective property: <Switch>.hostname
+Therefore if the CSV contains a header named ```<hostname>```, the corresponding class will have the respective property: ```<Switch>.hostname```.
 
 Hence, when we define class properties using the @property decorator we can essentially turn a variable lookup into a python function to handle complex tasks.
 
