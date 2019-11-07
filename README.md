@@ -8,7 +8,6 @@ The structure lends itelf for quick compilation of recurring structures found in
 
 The engine parses the template and compiles the defined structures using a combination of CSV file, recipe, and global variable definitions.
 
-We will use the EVPN recipe to fully demonstrate how to define your own templates and recipes.
 
 1. Template Definition
 
@@ -40,7 +39,9 @@ A. Variables
 ```
 The <variableName> will be search the following sources:
 a. global.conf
+
 This file contains two sections: global and the user-defined sections (e.g. evpn).
+
 Variables defined in the deployed section supercede the global definition unless found in the source csv; i.e. variable search first checks the source csv, then recipe, then the global namespace.
 
 Variables can also be extended to support a more complex operation but require definition within the python class.
@@ -54,7 +55,7 @@ def spine_hostname_list(self):
     return [spine.hostname for spine in SPINES]
 ```
 
-In the backend, all of the variables defined in the CSV become dot-notation class properties automatically.
+In the backend, all of the variables defined in the CSV automatically become dot-notation class properties.
 Therefore if the CSV contains a header named ```<hostname>```, the corresponding class will have the respective property: ```<Switch>.hostname```.
 
 Hence, when we define class properties using the @property decorator we can essentially turn a variable lookup into a python function to handle complex tasks.
@@ -74,8 +75,8 @@ B. Sections with tests
 config goes here
 @{<tests>}
 ```
-This structure is a section which fails completely if <tests> resolve to false.
-<tests> support multiple clauses separated by | i.e. ```{<test>|<test2>}``` will fail if <test> and <test2> are not defined.
+This structure is a section which fails completely if ```<tests>``` resolve to false.
+<tests> support multiple clauses separated by | i.e. ```{<test>|<test2>}``` will fail if ```<test>``` and ```<test2>``` are not defined.
 Furthermore tests support equality/inequality (=/!=) checks ```{<test>|varName=equals}``` or ```{<test>|varName!=notEquals}```.
 These can be used as needed to fail a section within a template. If we take a look at the EVPN recipie which calls for the mgmt|mlag|bgp-evpn templates, upon inspecting bgp-evpn we see a recurring test which checks the role:
 
