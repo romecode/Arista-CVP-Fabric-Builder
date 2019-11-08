@@ -298,7 +298,7 @@ def getKeyDefinition(key, source, section = None):
             found = SUPPLEMENT_FILES[file][_key]
             
          
-    key, op, qty = (found or key,) + math[0][1:] if math else (found or key, None, None)
+    key, op, qty = (found or math[0][0],) + math[0][1:] if math else (found or key, None, None)
     
     if op:
         if type(key) == list:
