@@ -213,7 +213,8 @@ As a full example let's build a template which maps VLAN's to VNI's.
 
 ```
 [vlan-to-vni]
-recipe = vlan-to-vni
+#recipe must be a list even with one option
+recipe = [vlan-to-vni]
 ```
 
 2. Create the template definition for vlan-to-vni in templates.conf
