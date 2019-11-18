@@ -5,6 +5,7 @@
 pip install virtualenv
 mkdir fabric_builder; cd fabric_builder
 virtualenv .
+pip install urllib3
 pip install git+https://github.com/aristanetworks/cvprac.git@develop
 pip install git+https://github.com/romecode/Arista-CVP-Fabric-Builder.git
 ```
@@ -21,6 +22,8 @@ I.e. pruning is controlled via ```{variables}``` which are pulled in the followi
 1. The device a template is being compiled for
 2. Section configuration
 3. Global configuration
+4. Another CSV e.g. ```{filename#vlan}```
+5. Telemetry endpoint e.g. ```{/Sysdb/routing/bgp/config#asNumber}```
 
 
 1. Template Definition
