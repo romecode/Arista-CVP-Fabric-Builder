@@ -1,12 +1,26 @@
 # Arista-CVP-Fabric-Builder
 
- 
+**INSTALL**
+```
+pip install virtualenv
+mkdir fabric_builder; cd fabric_builder
+virtualenv .
+pip install git+https://github.com/aristanetworks/cvprac.git@develop
+pip install git+https://github.com/romecode/Arista-CVP-Fabric-Builder.git
+```
 
 A templating engine which leverages recipies for template to configlet compilation using variables injected from CSV files, global, and recipe definitions. The templates support sections with tests ```@...@{tests}```, iterables/options ```[...]``` or ```[...]else[...]```, and plain old variables ```{...}```.
 
 The structure lends itelf for quick compilation of recurring structures found in network configurations.
 
 The engine parses the template and compiles the defined structures using a combination of CSV file, recipe, and global variable definitions.
+
+The approach to designing templates revolves around pruning sections from the parent template definition.
+There is a multitude of syntactical options to define sections to prune parts of the template accordingly.
+I.e. pruning is controlled via ```{variables}``` which are pulled in the following order from the follwing sources:
+1. The device a template is being compiled for
+2. Section configuration
+3. Global configuration
 
 
 1. Template Definition
