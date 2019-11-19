@@ -921,7 +921,7 @@ Variabled defined here {variable}
 which do not resolve will prune the entire group they belong to.
 
 Iterables/options with the plain [] syntax
-will also prune the whole section.
+will also prune the whole group.
 
 However if there is a necessity to keep the section due to failing iterables you can do so with the []else[] syntax.
 What happens in this case is that the first [] fails but falls back to the else[] which is considered valid, therefore the section stays.
