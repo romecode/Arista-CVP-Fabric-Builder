@@ -603,7 +603,7 @@ We can also see that for each device all the templates in the recipe list are co
 
 We could also have defined the ```mgmt``` variables in the recipe section like so.
 
-```
+
 ```
 [myRecipeName]
 recipe = [mgmt]
