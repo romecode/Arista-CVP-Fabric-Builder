@@ -13,30 +13,30 @@ pip install git+https://github.com/romecode/Arista-CVP-Fabric-Builder.git
 This tool is a complete day1/day2 Arista CVP solution for compiling configlets from templates, creating and assigning them in CVP, and appending new config.
 The template parsing engine is made to be fully customizable and extendable without the need to touch python code (very complex situations aside).
 
-Features:
-Add/remove CSV source file columns/data as you wish
-Compile one or more templates per run (fully customizable)
-Define recipes for what templates to compile (fully customizable)
-Override global variables within recipes
-Variables for templates can be sourced from CSV, recipe, global, external CSV, telemetry
-Template variables support math operations, comparisons
-A multitude of predefined syntax to support grouping, iterations, and other structures
-Talks to CVP via REST API
-Work with existing CVP devices or CSV defined
+**FEATURES:**
+- Add/remove CSV source file columns/data as you wish
+- Compile one or more templates per run (fully customizable)
+- Define recipes for what templates to compile (fully customizable)
+- Override global variables within recipes
+- Variables for templates can be sourced from CSV, recipe, global, external CSV, telemetry
+- Template variables support math operations, comparisons
+- A multitude of predefined syntax to support grouping, iterations, and other structures
+- Talks to CVP via REST API
+- Work with existing CVP devices or CSV defined
 
-Core files:
-builder.py contains all the Python code
-fabric_parameters.csv is the CSV which let's you define switch parameters (the headers are automatically available within the templates)
-global.conf defines the static global variables and additional recipes along with their own static variables (which override global variables with the same name)
-templates.conf defines the templates themselves
+**CORE FILES:**
+- builder.py contains all the Python code
+- fabric_parameters.csv is the CSV which let's you define switch parameters (the headers are automatically available within the templates)
+- global.conf defines the static global variables and additional recipes along with their own static variables (which override global variables with the same name)
+- templates.conf defines the templates themselves
 
-Quick example:
+**EXAMPLE:**
 
 NOTE: The below .conf files are parsed via the Python configParser library and they have their own syntax.
 In general:
 1. The square brackets define a new section
 2. Variables are assigned as such ```variableName = 123```
-3. # are comments
+3. \# are comments
 
 Our fabric_parameters.csv contents are as follows:
 The headers ```sn, hostname, role, container``` are absolutely required. Furthermore, ```role``` should alwas be either ```spine``` or ```leaf``` for differentiation.
@@ -77,7 +77,7 @@ mode is set to day1, which means this recipe and all requested templates will co
 
 3. To run
 
-*** First, activate virtualenv: cd to the fabric_builder folder and run ```source bin/activate```
+First, activate virtualenv: cd to the fabric_builder folder and run ```source bin/activate```
 run ```python builder.py```
 
 ```
@@ -86,7 +86,6 @@ run ```python builder.py```
 Type ? for available commands
 builder>deploy myRecipeName
 ```
-
 
 The program sets up it's own command interpreter ```builder>``` from which we use the ```deploy``` command and specify the recipe to execute (this is what we defined in global.conf)
 Since debug = True, the program will not touch CVP and simply print what it would have pushed to CVP.
@@ -129,11 +128,8 @@ builder>
 ```
 
 Each time a command is run, the global.conf, templates.conf, and fabric_parameters.csv are reloaded and any modifications are absorbed into the builder without having to restart.
-
 Examining the output... we can see that it initialized the fabric_parameters.csv and ran once per device.
-
 So we can see that configlets are automatically named using the template name, hostname, and CONFIG i.e. for this run: TEMPLATENAME1-DC-1-LF07-CONFIG and the resulting config as we defined it.
-
 This recipe compiled once per device in the csv according to the parameters. Now let's modify the template as such and introduce some new concepts.
 
 Our new template is now:
@@ -1307,5 +1303,5 @@ vlan 30
 **************************************************
 ```
 
-We injected external CSV filenames and iterated on their values.
-We specified telemetry endpoints and extracted the ```asNumber``` and ```Loopback0:addrWithMask``` from the CVP telemetry database for the device.
+We injected external CSV filenames and iterated on their values. Anything separated by a \# e.g. ```{filename#column}``` will try to open filename.csv and read that column.
+We specified telemetry endpoints and extracted the ```asNumber``` and ```Loopback0:addrWithMask``` from the CVP telemetry database for the device. Anything separated with a \# but starting with a forward slash will try to hit the telemetry API endpoint and extract the requested key.
