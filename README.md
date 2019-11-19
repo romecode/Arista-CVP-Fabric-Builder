@@ -1198,7 +1198,7 @@ compile_for/assign_to is always defined as a list and accepts container names, s
 There is a setting ```follow_child_containers``` which controls the behavior for specified containers, you can either return immediate switches in the container or follow the hierarchy and return all devices if child containers exist.
  
 There is also an option to make the template a ```singleton```; i.e. we want a global configlet which can be assigned to devices or containers.
-If ``singleton = True``` then compile_for is ignored and assign_to will treat containers/devices as single nodes where to assign the singleton configlet.
+If ```singleton = True``` then compile_for is ignored and assign_to will treat containers/devices as single nodes where to assign the singleton configlet.
  
 If a configlet is a singleton we wouldn't care about multiple devices so expanding containers makes no sense.
 
