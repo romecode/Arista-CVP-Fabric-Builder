@@ -25,7 +25,7 @@ class Log():
         self.fabric_builder_log = open('fabric_builder_log.txt', 'a')
         
     def log(self,string):
-        string = "{0}: {1}\n".format( datetime.datetime.now(), string )
+        string = "{0}: {1}\n".format( datetime.datetime.now().strftime('%c'), string )
         sys.stderr.write(string)
         self.fabric_builder_log.write(string)
 
@@ -159,7 +159,7 @@ class Switch():
         for k, v in params.items():
             setattr(self, k, str(v).replace("|",","))
             
-        self.sn = (getattr(self, 'serialNumber') or getattr(self, 'sn')).lower()
+        self.sn = (searchSource('serialNumber', self) or searchSource('sn', self)).lower()
         
         if implicitRole == 'spine':
             self.role = 'spine'
@@ -409,6 +409,7 @@ def getKeyDefinition(key, source, section = None):
         math = re.findall('(\w+)([+\-*]+)(\d+)?', _key)
         _key = math[0][0] if math else _key
         if file.startswith('/') and hasattr(CVP, 'cvprac'):
+            #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
             found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
             try:
                 found = found['notifications'][0]['updates'][_key]['value']
@@ -435,20 +436,22 @@ def getKeyDefinition(key, source, section = None):
                             SUPPLEMENT_FILES[file][k].append(v)
                 found = SUPPLEMENT_FILES[file][_key]
             
-         
-    key, op, qty = (found or math[0][0],) + math[0][1:] if math else (found or key, None, None)
-    
-    if op:
-        if type(key) == list:
-            return (key, op, qty)
-        elif key.isdigit():
-            return (int(key), op, qty)
+    if math:
+        if found:
+            key = found
         else:
-            return (int(searchSource(key, source) or searchConfig(key, section)), op, qty)
-        
-        
+            key = math[0][0] if math[0][0].isdigit() else searchSource(math[0][0], source) or searchConfig(math[0][0], section) 
+            if type(key) == list:
+                key = [int(val) for val in key]
+            else:
+                key = int(key)
 
-    return found or searchSource(key, source) or searchConfig(key, section)
+        op, qty = math[0][1:]
+        return (key, op, qty)
+    else:
+        return found or searchSource(key, source) or searchConfig(key, section)
+        
+    
 
 def parseForRequiredKeys(template):
     return re.findall('{(.*?)}', template)
@@ -501,16 +504,13 @@ def getBySerial(sn):
 
 class Math():
     def __init__(self, start, op, qty):
-        
         self.iter = None
         self.counter = None
-        
         
         if type(start) == list:
             self.iter = iter(start)
         else:  
             self.counter = int(start)
-
         
         if op == '+':
             self.do = self.increment
@@ -525,18 +525,29 @@ class Math():
     def current(self):
         return int(next(self.iter)) if self.iter else self.counter
     
-    def store(self):
-        if self.counter:
-            self.counter += self.qty
+    def store(self, op):
+        if op == 0:
+            if self.counter:
+                self.counter += self.qty
+        elif op == 1:
+            if self.counter:
+                self.counter *= self.qty
     
     def increment(self):
         current = self.current()
-        self.store()
-        return current
+        if self.iter:
+            return current + self.qty
+        else:
+            self.store(0)
+            return current
     
     def multiply(self):
         current = self.current()
-        return current * self.qty
+        if self.iter:
+            return current * self.qty
+        else:
+            self.store(1)
+            return current
         
 class Configlet():
     def __init__(self, name, params = {}, injectSection = None):        
@@ -574,6 +585,7 @@ class Configlet():
                             flag = not flag if not flag else flag
                             values_and_getters.append((iter(item), lambda item:next(item)))
                         elif type(item) == tuple:
+                            flag = not flag if not flag else flag
                             values_and_getters.append((Math(*item), lambda item:item.do()))
                         else:
                             values_and_getters.append((item, lambda item:item))
@@ -648,7 +660,12 @@ class Configlet():
         #support only one iterable for now from the global space
         compiledIterables = self.compileIterables(source, baseTemplate)
         errorIterables = compiledIterables.pop('error')
-        
+        for toReplace, errorKeys in errorIterables:
+            LOGGER.log("Pruned configlet option {0} in {1}: variable {2} undefined".format(
+                        toReplace.replace('\n','')[:15] + '...',
+                        self.name,
+                        ','.join(errorKeys)
+            ))
         for toReplace, compiled in compiledIterables.items():   
             baseTemplate = baseTemplate.replace(toReplace, compiled)  
             
