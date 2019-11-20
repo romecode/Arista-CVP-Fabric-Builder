@@ -441,12 +441,9 @@ def getKeyDefinition(key, source, section = None):
             key = found
         else:
             key = math[0][0] if math[0][0].isdigit() else searchSource(math[0][0], source) or searchConfig(math[0][0], section) 
-            if type(key) == list:
-                key = [int(val) for val in key]
-            else:
-                key = int(key)
-
+                
         op, qty = math[0][1:]
+
         return (key, op, qty)
     else:
         return found or searchSource(key, source) or searchConfig(key, section)
@@ -580,17 +577,22 @@ class Configlet():
                     _compiled = []
                     flag = False
                     for item in values_list: 
+                        #if the item is just a list without math then use StopIteration exception to stop iterations
                         if type(item) == list:
                             #found at least one list
                             flag = not flag if not flag else flag
                             values_and_getters.append((iter(item), lambda item:next(item)))
+                        #if the item is a tuple then it wraps the item inside the tuple with math ops to be done e.g. (value, op, qty) where value can be a list, if so compile until exhausted
                         elif type(item) == tuple:
-                            flag = not flag if not flag else flag
+                            if type(item[0]) == list:
+                                flag = not flag if not flag else flag
                             values_and_getters.append((Math(*item), lambda item:item.do()))
+                        #this is a single value, no math, compile once
                         else:
                             values_and_getters.append((item, lambda item:item))
                     #exhaust iterators
                     try:
+                        #if flag is tripped then we know to iterate until the exception
                         while flag:
 
                             _compiled.append(_template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters]))))
