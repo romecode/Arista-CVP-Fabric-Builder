@@ -19,7 +19,7 @@ The template parsing engine is made to be fully customizable and extendable with
 - Define recipes for what templates to compile (fully customizable)
 - Override global variables within recipes
 - Variables for templates can be sourced from CSV, recipe, global, external CSV, telemetry
-- Template variables support math operations, comparisons
+- Template variables support math operations, comparisons, truncation
 - A multitude of predefined syntax to support grouping, iterations, and other structures
 - Talks to CVP via REST API
 - Work with existing CVP devices or CSV defined
@@ -1235,7 +1235,7 @@ basetemplate =
 	
 	router bgp {/Sysdb/routing/bgp/config#asNumber}
 	 	[~vlan {exampleFilename#vlan}
-	 		~~rd {/Sysdb/ip/config/ipIntfConfig/Loopback0#addrWithMask}:{exampleFilename#vlan*10}
+	 		~~rd {/Sysdb/ip/config/ipIntfConfig/Loopback0#addrWithMask(:-3)}:{exampleFilename#vlan*10}
 	 		~~route-target both {exampleFilename#vlan*10}:{exampleFilename#vlan*10}
 	 		~~redistribute learned
 	 	~!]
@@ -1304,4 +1304,6 @@ vlan 30
 ```
 
 We injected external CSV filenames and iterated on their values. Anything separated by a \# e.g. ```{filename#column}``` will try to open filename.csv and read that column.
-We specified telemetry endpoints and extracted the ```asNumber``` and ```Loopback0:addrWithMask``` from the CVP telemetry database for the device. Anything separated with a \# but starting with a forward slash will try to hit the telemetry API endpoint and extract the requested key.
+We specified telemetry endpoints and extracted the ```asNumber``` and ```Loopback0:addrWithMask(:-3)``` from the CVP telemetry database for the device. Anything separated with a \# but starting with a forward slash will try to hit the telemetry API endpoint and extract the requested key.
+Notice the truncation syntax is exactly as Python's syntax except we use brackets.
+Math and Truncation cannot be used together; this can be but is not supported as of now.

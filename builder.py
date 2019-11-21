@@ -10,6 +10,7 @@ import sys
 import datetime
 from itertools import chain
 
+
 LOGGER = None
 CVP = None
 CONFIG = {}
@@ -347,7 +348,7 @@ class Manager():
                     template = TEMPLATES[template]
                     self.tasks_to_deploy.append(Task(template = template, apply_to = apply_to))
             else:
-                print DEVICES
+                #print DEVICES
                 for sn, device in DEVICES.items():
                 
                     for template in recipe:
@@ -401,13 +402,31 @@ def getKeyDefinition(key, source, section = None):
     
     csv_telemetry_source = key.split('#')
     found = None
-    math = re.findall('(\w+)([+\-*]+)(\d+)?', key)   
+    truncate = None
     
+    math = parseForMath(key)
+    if not math:
+        key, truncate = parseForTruncation(key)[0]
+    else:
+        key = math[0][0]
+    
+    
+    def truncateValues(values, start = None, end = None):
+        if type(values) == list:
+            return [str(val)[start:end] for val in values]
+        else:
+            return str(values)[start:end]
+
     if len(csv_telemetry_source) == 2:
         file = csv_telemetry_source[0]
         _key = csv_telemetry_source[1]
-        math = re.findall('(\w+)([+\-*]+)(\d+)?', _key)
-        _key = math[0][0] if math else _key
+        math = parseForMath(_key)
+
+        if not math:
+            _key, truncate = parseForTruncation(_key)[0]
+        else:
+            _key = math[0][0]
+        
         if file.startswith('/') and hasattr(CVP, 'cvprac'):
             #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
             found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
@@ -435,7 +454,15 @@ def getKeyDefinition(key, source, section = None):
                         for k, v in row.items():
                             SUPPLEMENT_FILES[file][k].append(v)
                 found = SUPPLEMENT_FILES[file][_key]
-            
+
+    if truncate:
+        start, end = truncate[1:-1].split(':')
+        start = int(start) if start else None
+        end = int(end) if end else None
+    else:
+        start, end = (None, None)
+    
+
     if math:
         if found:
             key = found
@@ -443,10 +470,9 @@ def getKeyDefinition(key, source, section = None):
             key = math[0][0] if math[0][0].isdigit() else searchSource(math[0][0], source) or searchConfig(math[0][0], section) 
                 
         op, qty = math[0][1:]
-
         return (key, op, qty)
     else:
-        return found or searchSource(key, source) or searchConfig(key, section)
+        return truncateValues(found or searchSource(key, source) or searchConfig(key, section), start, end)
         
     
 
@@ -458,6 +484,12 @@ def parseForIterables(template):
 
 def parseForSections(template):
     return re.findall('(@[\s\S]*?@)({.*?})*', template)
+
+def parseForTruncation(key):
+    return re.findall('([\w]+)(\([-+]?\d*:[-+]?\d*\))?', key)
+
+def parseForMath(key):
+    return re.findall('(\w+)([+\-*]+)(\d+)?', key)
 
 #builds a tuple of values followed by a comparator lambda
 #used to check if tests pass while supporting section injections from the global variable space
@@ -483,7 +515,7 @@ def buildValueDict(source, template, injectSection = None):
     valueDict['error'] = []
     
     keys = parseForRequiredKeys(template)
-    
+
     for key in keys:
         #check if dict already has defined
         if valueDict.get(key, None):
@@ -590,15 +622,25 @@ class Configlet():
                         #this is a single value, no math, compile once
                         else:
                             values_and_getters.append((item, lambda item:item))
+                    #sanitize format syntax from templates and replase actual keys with positionals        
+                    _keys = []
+                    
+                    #don't modify existing i
+                    for x, key in enumerate(keys, 0):
+                        x = 'i'+str(x)
+                        _template = _template.replace(key, x)
+                        _keys.append(x)
+                        
+
                     #exhaust iterators
                     try:
                         #if flag is tripped then we know to iterate until the exception
                         while flag:
 
-                            _compiled.append(_template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters]))))
+                            _compiled.append(_template.format(**dict(zip(_keys, [function(value) for value, function in values_and_getters]))))
                         else:
                             #no lists were found return once
-                            compiled[template] = _template.format(**dict(zip(keys, [function(value) for value, function in values_and_getters])))    
+                            compiled[template] = _template.format(**dict(zip(_keys, [function(value) for value, function in values_and_getters])))    
                     except StopIteration:
                         compiled[template] = '\n'.join(_compiled)
                     
@@ -615,6 +657,8 @@ class Configlet():
     
     
     def compile(self, source):
+        #TODO: Right now all the string replacements happen literally carrying the groups as the toReplace parameters
+        #can definitely do this better
         baseTemplate = self.basetemplate
         
         #parse for sections @...@{test}
@@ -680,8 +724,15 @@ class Configlet():
         if errorKeys:
             LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, ','.join(errorKeys)))
             return ' '
+        
+        #sanitize format syntax from templates and replase actual keys with positionals        
+        _keys = []
+        for i, key in enumerate(valueDict.keys(), 0):
+            i = 'i'+str(i)
+            baseTemplate = baseTemplate.replace(key, i)
+            _keys.append(i)
         try:
-            baseTemplate = baseTemplate.format(**valueDict)
+            baseTemplate = baseTemplate.format(**dict(zip(_keys, valueDict.values())))
         except KeyError as E:
             LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, E))
             #must return a value which passes a boolean test
