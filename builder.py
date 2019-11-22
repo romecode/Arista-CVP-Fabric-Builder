@@ -16,6 +16,8 @@ CVP = None
 CONFIG = {}
 TEMPLATES = {}
 DEVICES = {}
+COMPILE_FOR = []
+ASSIGN_TO = []
 HOST_TO_DEVICE = {}
 SUPPLEMENT_FILES = {}
 SPINES = []
@@ -26,7 +28,7 @@ class Log():
         self.fabric_builder_log = open('fabric_builder_log.txt', 'a')
         
     def log(self,string):
-        string = "{0}: {1}\n".format( datetime.datetime.now().strftime('%c'), string )
+        string = "{0}: {1}\n".format( datetime.datetime.now().strftime('%a %b %d %H:%M'), string )
         sys.stderr.write(string)
         self.fabric_builder_log.write(string)
 
@@ -52,17 +54,17 @@ class Cvp():
             LOGGER.log("Unable to find the CVPRAC module")
             
         
-        #try:
-        self.containers = self.cvprac.api.get_containers()['data']
-        for cont in self.containers:
-            self.containerTree[cont['name'].lower()] = [_cont['name'].lower() for _cont in self.containers if _cont['parentName'] == cont['name']]
-        for device in self.cvprac.api.get_inventory():
-            self.devices[device['serialNumber'].lower()] = device
-            self.host_to_device[device['hostname'].lower()] = self.devices[device['serialNumber'].lower()]
+        try:
+            self.containers = self.cvprac.api.get_containers()['data']
+            for cont in self.containers:
+                self.containerTree[cont['name'].lower()] = [_cont['name'].lower() for _cont in self.containers if _cont['parentName'] == cont['name']]
+            for device in self.cvprac.api.get_inventory():
+                self.devices[device['serialNumber'].lower()] = device
+                self.host_to_device[device['hostname'].lower()] = self.devices[device['serialNumber'].lower()]
             
-        #except:
-        #    LOGGER.log("Unable to connect to CVP Server")
-        #    sys.exit(0)
+        except:
+            LOGGER.log("Unable to connect to CVP Server")
+            #sys.exit(0)
     
     def getBySerial(self, sn):
         return self.devices.get(sn.lower(), None)
@@ -98,12 +100,12 @@ class Cvp():
     def deployDevice(self, device, container, configlets_to_deploy):
         if self.cvprac:
             try:
+                
                 if device.cvp['provisioned']:
                     ids = self.cvprac.api.apply_configlets_to_device('fabric_builder', device, configlets_to_deploy)
                 else:
-                    
                     ids = self.cvprac.api.deploy_device(device, container, configlets_to_deploy)
-                print ids
+
             except self.CvpApiError as err:
                 LOGGER.log("Deploying device {0}: failed, could not get task id from CVP".format(device.sn))
             else:
@@ -119,33 +121,36 @@ class Cvp():
         pass
         
 class Task():
-    def __init__(self, device = None, template = None, apply_to = None):
+    def __init__(self, device = None, template = None):
         self.device = device
         self.template = template
-        self.apply_to = apply_to
+        self.singleton = True if template else False
+
     #the task finally figures out what to assign and compile
     def execute(self):
-        configlet_keys = []
-        if not self.template:
+        
+        if self.singleton:
+            #deal with singletons
+            if searchConfig('debug'):
+                print '\n\n'+'-'*50
+                print searchConfig('assign_to', self.template.injectSection)
+                print '-'*50
+                print self.template.compile({})
+            else:
+                pass
+        else:
             for item in self.device.to_deploy:
                 name, configlet = item
                 if searchConfig('debug'):
-                    print '*'*50
+                    print '\n\n'+'-'*50
                     print name
-                    print '*'*50
+                    print '-'*50
                     print configlet.compile(self.device)
-                    print '*'*50
                 else:
                     #configlet_keys.append(CVP.addOrUpdateConfiglet(name, configlet.compile(self.device)))
                     #tasks = CVP.deployDevice(self.device.cvp, self.device.container, configlet_keys)
                     print "I am where I want to be"
-            self.device.to_deploy = []
-        else:
-            #deal with singletons
-            print "Singleton, Whoo Hoo! Far Boo"
-            print self.template.compile({})
-            print self.apply_to
-                
+            self.device.to_deploy = []    
         
             
 
@@ -304,7 +309,7 @@ def fetchDevices(search, follow_child_containers = False):
     search = search if type(search) == list else [search]
     devices = []
     for _search in search:
-        _search = _search.lower()
+        
         try:
             device = CVP.getBySerial(_search) or CVP.getByHostname(_search)
             if device:
@@ -315,53 +320,6 @@ def fetchDevices(search, follow_child_containers = False):
         except KeyError as E:
             LOGGER.log("Could not find {0}".format(_search))
     return list(chain.from_iterable(devices))   
-    
-        
-class Manager():
-    
-    def __init__(self):
-        self.tasks_to_deploy = []    
-        
-    def deploy(self, section):
-        
-        recipe = searchConfig("recipe", section)
-        mode = searchConfig('mode', section)
-        
-        #control what tasks get created, DEVICES are already loaded accordingly
-        if mode == 'day1':
-            for sn, device in DEVICES.items():
-                
-                for template in recipe:
-                    template = TEMPLATES[template]
-                    device.assign_configlet(template)
-                if device.role == "spine":
-                    self.tasks_to_deploy.append(Task(device))
-                else:
-                    self.tasks_to_deploy.insert(0,Task(device))
-                    
-            
-        elif mode == 'day2':
-            singleton = searchConfig('singleton', section)
-            if singleton:
-                apply_to = searchConfig('apply_to', section)
-                for template in recipe:
-                    template = TEMPLATES[template]
-                    self.tasks_to_deploy.append(Task(template = template, apply_to = apply_to))
-            else:
-                #print DEVICES
-                for sn, device in DEVICES.items():
-                
-                    for template in recipe:
-                        template = TEMPLATES[template]
-                        device.assign_configlet(template)
-                    if device.role == "spine":
-                        self.tasks_to_deploy.append(Task(device))
-                    else:
-                        self.tasks_to_deploy.insert(0,Task(device))
-            
-        for task in self.tasks_to_deploy:
-            task.execute()
-        self.tasks_to_deploy = []
                   
                 
 #HELPER FN FOR DEALING WITH OPTIONS IN BASE CONFIGLET TEMPLATES                    
@@ -389,7 +347,7 @@ def searchConfig(key, section = None):
             return None
 
     if config.startswith('[') and config.endswith(']'):
-        return [v.strip() for v in config[1:-1].split('|')]
+        return [v.strip() for v in config[1:-1].split('|') if v]
         
     if config == 'True':
         return True
@@ -410,7 +368,6 @@ def getKeyDefinition(key, source, section = None):
     else:
         key = math[0][0]
     
-    
     def truncateValues(values, start = None, end = None):
         if type(values) == list:
             return [str(val)[start:end] for val in values]
@@ -418,10 +375,11 @@ def getKeyDefinition(key, source, section = None):
             return str(values)[start:end]
 
     if len(csv_telemetry_source) == 2:
+        
         file = csv_telemetry_source[0]
         _key = csv_telemetry_source[1]
+        
         math = parseForMath(_key)
-
         if not math:
             _key, truncate = parseForTruncation(_key)[0]
         else:
@@ -462,7 +420,6 @@ def getKeyDefinition(key, source, section = None):
     else:
         start, end = (None, None)
     
-
     if math:
         if found:
             key = found
@@ -473,8 +430,6 @@ def getKeyDefinition(key, source, section = None):
         return (key, op, qty)
     else:
         return truncateValues(found or searchSource(key, source) or searchConfig(key, section), start, end)
-        
-    
 
 def parseForRequiredKeys(template):
     return re.findall('{(.*?)}', template)
@@ -554,20 +509,12 @@ class Math():
     def current(self):
         return int(next(self.iter)) if self.iter else self.counter
     
-    def store(self, op):
-        if op == 0:
-            if self.counter:
-                self.counter += self.qty
-        elif op == 1:
-            if self.counter:
-                self.counter *= self.qty
-    
     def increment(self):
         current = self.current()
         if self.iter:
             return current + self.qty
         else:
-            self.store(0)
+            self.counter += self.qty
             return current
     
     def multiply(self):
@@ -575,7 +522,7 @@ class Math():
         if self.iter:
             return current * self.qty
         else:
-            self.store(1)
+            self.counter *= self.qty
             return current
         
 class Configlet():
@@ -625,7 +572,7 @@ class Configlet():
                     #sanitize format syntax from templates and replase actual keys with positionals        
                     _keys = []
                     
-                    #don't modify existing i
+                    #don't modify existing i; this is to sanitize and replace invalid keys in the format function
                     for x, key in enumerate(keys, 0):
                         x = 'i'+str(x)
                         _template = _template.replace(key, x)
@@ -725,7 +672,7 @@ class Configlet():
             LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, ','.join(errorKeys)))
             return ' '
         
-        #sanitize format syntax from templates and replase actual keys with positionals        
+        #this is to sanitize and replace invalid keys in the format function    
         _keys = []
         for i, key in enumerate(valueDict.keys(), 0):
             i = 'i'+str(i)
@@ -764,32 +711,54 @@ def loadTemplates(injectSection = None):
         TEMPLATES[sectionName] = Configlet(sectionName, dict(parser.items(sectionName)), injectSection)
     
 def loadDevices(injectSection = None):
+
     global DEVICES
     global SPINES
+    global ASSIGN_TO
+    global COMPILE_FOR
     global HOST_TO_DEVICE
 
     
     DEVICES = {}
     SPINES = []
+    ASSIGN_TO = []
+    COMPILE_FOR = []
     HOST_TO_DEVICE = {}
     
     mode = searchConfig('mode', injectSection)
-    
-    def appendDevice(device, to, implicitRole = False):
-        sn = device['serialNumber'].lower()
-        to[sn] = Switch(device, device, injectSection, implicitRole)
-        HOST_TO_DEVICE[to[sn].hostname.lower()] = to[sn]
+        
 
     if mode == 'day2':
         spines = searchConfig('spines', injectSection)
+        leafs = searchConfig('leafs', injectSection)
+        compile_for = searchConfig('compile_for', injectSection)
+        assign_to = searchConfig('assign_to', injectSection)
+        
         follow_child_containers = searchConfig('follow_child_containers', injectSection)
-        spines = fetchDevices(spines, follow_child_containers)
-        devices = fetchDevices(searchConfig('compile_for', injectSection), follow_child_containers)
-        for device in devices:
-            appendDevice(device, DEVICES)
-        for device in spines:
-            sn = device['serialNumber'].lower()
-            SPINES.append(Switch(device, device, injectSection, implicitRole = 'spine'))
+        
+        spines = fetchDevices(spines, follow_child_containers) if spines else []
+        leafs = fetchDevices(leafs, follow_child_containers) if leafs else []
+        compile_for = fetchDevices(compile_for, follow_child_containers) if compile_for else []
+        assign_to = fetchDevices(assign_to, follow_child_containers) if assign_to else []
+        
+        #build the master list and label the implicit role for day2, since we don't know what's what
+        for sn, device in CVP.devices.items():
+            
+            implicitRole = None
+            if device in leafs:
+                implicitRole = 'leaf'
+            elif device in spines:
+                implicitRole = 'spine'
+                
+            DEVICES[sn] = Switch(device, device, injectSection, implicitRole)
+            HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
+            
+            if implicitRole == 'spine':
+                SPINES.append(DEVICES[sn])
+            if device in compile_for:
+                COMPILE_FOR.append(DEVICES[sn])
+            if device in assign_to:
+                ASSIGN_TO.append(DEVICES[sn])
             
     elif mode == 'day1':
         with open("fabric_parameters.csv") as f:
@@ -806,8 +775,50 @@ def loadDevices(injectSection = None):
                 if row[role_index].lower() == "spine":
                     SPINES.append(DEVICES[sn])
     
+class Manager():
     
-    
+    def __init__(self):
+        self.tasks_to_deploy = []    
+        
+    def deploy(self, section):
+        
+        recipe = searchConfig("recipe", section)
+        mode = searchConfig('mode', section)
+        
+        #control what tasks get created, DEVICES are already loaded accordingly
+        if mode == 'day1':
+            
+            for sn, device in DEVICES.items():
+                for template in recipe:
+                    template = TEMPLATES[template]
+                    device.assign_configlet(template)
+                if device.role == "spine":
+                    self.tasks_to_deploy.append(Task(device))
+                else:
+                    self.tasks_to_deploy.insert(0,Task(device))
+            
+        elif mode == 'day2':
+            singleton = searchConfig('singleton', section)
+            
+            if singleton:
+                for template in recipe:
+                    template = TEMPLATES[template]
+                    self.tasks_to_deploy.append(Task(template = template))
+            else:
+                                
+                for device in COMPILE_FOR:                
+                    for template in recipe:
+                        template = TEMPLATES[template]
+                        device.assign_configlet(template)
+                    if device.role == "spine":
+                        self.tasks_to_deploy.append(Task(device))
+                    else:
+                        self.tasks_to_deploy.insert(0,Task(device))
+            
+        for task in self.tasks_to_deploy:
+            task.execute()
+        self.tasks_to_deploy = []
+
 class FabricBuilder(cmd.Cmd):
     """Arista Fabric Initializer"""
     intro = 'Type ? for available commands' 
@@ -820,14 +831,15 @@ class FabricBuilder(cmd.Cmd):
     def do_deploy(self, section):
         mode = searchConfig('mode', section)
         if mode == 'day2':
-            follow_child_containers = searchConfig('follow_child_containers', section)
             spines = searchConfig('spines', section)
             leafs = searchConfig('leafs', section)
+            
             if not (spines and leafs):
                 LOGGER.log('Recipe error: for mode = day2, spines and leaves must be defined in the global or recipe config')
                 return True
             singleton = searchConfig('singleton', section)
             compile_for = searchConfig('compile_for', section)
+            
             if not singleton and not compile_for:
                 LOGGER.log('Recipe error: for singleton = False, compile_for must be defined in the global or recipe config')
                 return True
@@ -835,23 +847,10 @@ class FabricBuilder(cmd.Cmd):
         buildGlobalData(section)
         MANAGER.deploy(section)
         
-        
     def do_test(self, line):
         args = line.split(',')
         buildGlobalData(args[2] if 2 < len(args) else None)
         getBySerial(args[0]).compile_configlet(TEMPLATES[args[1]])
-        
-    def do_compile(self, line):
-        args = line.split(',')
-        
-    def do_teapi(self,ip):
-        #PYEAPI
-        #conn = pyeapi.connect(host=ip,username=searchConfig('cvp_user'],password=searchConfig('cvp_pass'])
-        #print conn.execute(["show platform"])
-        
-        switch = Server( "https://{0}:{1}@10.20.30.23/command-api".format(searchConfig('cvp_user'),searchConfig('cvp_pass')) )
-        response = switch.runCmds( 1, [ "show platform jericho" ], 'text' ) 
-        print response
         
     def do_EOF(self, line):
         return True
