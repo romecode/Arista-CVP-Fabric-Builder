@@ -6,6 +6,7 @@ pip install virtualenv
 mkdir fabric_builder; cd fabric_builder
 virtualenv .
 pip install urllib3
+pip install xlrd
 pip install git+https://github.com/aristanetworks/cvprac.git@develop
 pip install git+https://github.com/romecode/Arista-CVP-Fabric-Builder.git
 ```

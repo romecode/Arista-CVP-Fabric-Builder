@@ -1,14 +1,15 @@
 import cmd
 import csv
 from ConfigParser import SafeConfigParser
-from collections import defaultdict
 import urllib3
 import re
 from ipaddress import ip_address
 import os, ssl
 import sys
 import datetime
+import xlrd
 from itertools import chain
+
 
 
 LOGGER = None
@@ -31,8 +32,6 @@ class Log():
         string = "{0}: {1}\n".format( datetime.datetime.now().strftime('%a %b %d %H:%M'), string )
         sys.stderr.write(string)
         self.fabric_builder_log.write(string)
-
-
   
 class Cvp():
     def __init__(self):
@@ -58,6 +57,7 @@ class Cvp():
             self.containers = self.cvprac.api.get_containers()['data']
             for cont in self.containers:
                 self.containerTree[cont['name'].lower()] = [_cont['name'].lower() for _cont in self.containers if _cont['parentName'] == cont['name']]
+            self.containers = {_cont['name'].lower():_cont for _cont in self.containers}
             for device in self.cvprac.api.get_inventory():
                 self.devices[device['serialNumber'].lower()] = device
                 self.host_to_device[device['hostname'].lower()] = self.devices[device['serialNumber'].lower()]
@@ -65,6 +65,33 @@ class Cvp():
         except:
             LOGGER.log("Unable to connect to CVP Server")
             #sys.exit(0)
+            
+    def applyConfiglets(self, to, configlets):
+        app_name = "CVP Configlet Builder"
+        to = to if type(to) == list else [to]
+        configlets = configlets if type(configlets) == list else [configlets]
+        results = []
+        toContainer = None
+        toDevice = None
+        
+        #dest is a container, sn. or hostname string
+        for dest in to:
+            LOGGER.log("Pushing configlets to {0}; please wait...".format(dest))
+            toContainer = self.getContainerByName(dest)
+            if toContainer:
+                _result = self.cvprac.api.apply_configlets_to_container(app_name, toContainer, configlets)    
+            else:
+                #apply to device
+                toDevice = self.getBySerial(dest) or self.getByHostname(dest)
+                _result = self.cvprac.api.apply_configlets_to_device(app_name, toDevice, configlets) if toDevice else None
+            
+            if not (toDevice or toContainer):
+                errorOn = [_conf['name'] for _conf in configlets]
+                LOGGER.log("Failed to push {0}; {1} not found".format(','.join(errorOn), dest))
+            elif _result and _result['data']['status'] == 'success':
+                results.append(_result['data']['taskIds'])
+                
+        return list(chain.from_iterable(results))
     
     def getBySerial(self, sn):
         return self.devices.get(sn.lower(), None)
@@ -72,7 +99,11 @@ class Cvp():
     def getByHostname(self, hostname):
         return self.host_to_device.get(hostname.lower(), None)
     
+    def getContainerByName(self, name):
+        return self.containers.get(name.lower(), None)
+    
     def getContainerDevices(self, containerName, follow = False):
+        containerName = containerName.lower()
         tree = [containerName] + self.containerTree[containerName] if follow else [containerName]
         return [device for device in self.devices.values() if device['containerName'].lower() in tree]
     
@@ -80,20 +111,25 @@ class Cvp():
     def addOrUpdateConfiglet(self, configlet_name, configlet_content):
         # Check if we already have a configlet by this name
         if self.cvprac:
+            
             try:
+                
                 configlet = self.cvprac.api.get_configlet_by_name(configlet_name)
             except self.CvpApiError as err:
                 if 'Entity does not exist' in err.msg:
                     # Configlet doesn't exist let's create one
+                    LOGGER.log("Creating configlet {0}; please wait...".format(configlet_name))
                     result = self.cvprac.api.add_configlet(configlet_name, configlet_content)
                 else:
                     raise
             else:
                 # Configlet does exist, let's update the content only if not the same (avoid empty task)
+                LOGGER.log("Found configlet {0}".format(configlet_name))
                 if configlet['config'] != configlet_content:
+                    LOGGER.log("Updating configlet {0}; please wait...".format(configlet_name))
                     result = self.cvprac.api.update_configlet(configlet_content, configlet['key'], configlet_name)
             
-            return self.cvprac.api.get_configlet_by_name(configlet_name)['key']
+            return self.cvprac.api.get_configlet_by_name(configlet_name)
         else:
             return None
     
@@ -121,35 +157,76 @@ class Cvp():
         pass
         
 class Task():
-    def __init__(self, device = None, template = None):
+    def __init__(self, device = None, template = None, mode = None):
         self.device = device
         self.template = template
         self.singleton = True if template else False
-
+        self.mode = mode
     #the task finally figures out what to assign and compile
     def execute(self):
+        debug = searchConfig('debug')
+        created_keys = []
         
+        def pushToCvp():
+            if self.device.cvp['containerName'] == 'Undefined' and searchSource('container', self.device):
+                print 'DEPLOY DEVICE'
+                #CVP.deployDevice(self.device.cvp, self.device.container, configlet_keys)
+            elif self.device.cvp['containerName'] == 'Undefined' and not searchSource('container', self.device):
+                LOGGER.log("Cannot deploy {0}; non-provisioned device with no destination container defined".format(self.device.sn.upper()))
+            else:
+                print "APPLY CONFIGLETS"
+                #CVP.applyConfiglets(self.device.cvp, configlet_keys)
+                
         if self.singleton:
             #deal with singletons
-            if searchConfig('debug'):
+            name = self.template.name.upper()
+            compiled = self.template.compile({})
+            assign_to = searchConfig('assign_to', self.template.injectSection)
+            
+            if debug:
                 print '\n\n'+'-'*50
-                print searchConfig('assign_to', self.template.injectSection)
+                print "Assign to: "+ ','.join(assign_to)
                 print '-'*50
-                print self.template.compile({})
-            else:
-                pass
+                print name
+                print '-'*50
+                print compiled
+                return
+            
+            
+            
+            createdConf = CVP.addOrUpdateConfiglet(name, compiled)
+            
+            createdTasks = CVP.applyConfiglets(assign_to, createdConf) if assign_to else []
+            if createdTasks:
+                LOGGER.log("Successfully created tasks {0}".format(','.join(map(str, createdTasks))))
+
+     
         else:
+            #day1 undefined deployment
+            configlet_keys = []
             for item in self.device.to_deploy:
                 name, configlet = item
-                if searchConfig('debug'):
+                
+                if debug:
                     print '\n\n'+'-'*50
                     print name
                     print '-'*50
                     print configlet.compile(self.device)
+                    continue
+                
+                configlet_keys.append(CVP.addOrUpdateConfiglet(name, configlet.compile(self.device)))
+
+            #devies are undefined
+            if not debug:
+                print self.device.sn
+                if self.mode == 2 and ASSIGN_TO:
+
+                    if self.device.cvp in ASSIGN_TO:
+                        pushToCvp()
                 else:
-                    #configlet_keys.append(CVP.addOrUpdateConfiglet(name, configlet.compile(self.device)))
-                    #tasks = CVP.deployDevice(self.device.cvp, self.device.container, configlet_keys)
-                    print "I am where I want to be"
+                    pushToCvp()
+                    
+            
             self.device.to_deploy = []    
         
             
@@ -209,7 +286,7 @@ class Switch():
     @property    
     def mlag_address(self):
         try:
-            neighbor = HOST_TO_DEVICE[self.mlag_neighbor]
+            neighbor = getByHostname(self.mlag_neighbor)
             mgmt_ip = ip_address(unicode(self.mgmt_ip))
             neighbor_mgmt = ip_address(unicode(neighbor.mgmt_ip))
             global_mlag_address = ip_address(unicode(self.searchConfig('mlag_address')))
@@ -218,15 +295,15 @@ class Switch():
             else:
                 return global_mlag_address
         except:
-            return ' '
+            return 'ERROR'
         
     @property
     def mlag_peer_address(self):
         try:
-            neighbor = HOST_TO_DEVICE[self.mlag_neighbor]
+            neighbor = getByHostname(self.mlag_neighbor)
             return str(neighbor.mlag_address)
         except:
-            return ' '
+            return 'ERROR'
     
     @property
     def reload_delay_0(self):
@@ -282,7 +359,7 @@ class Switch():
         if len(SPINES) >= 1:
             return SPINES[0].asn
         else:
-            return None
+            return 'ERROR'
 
           
     @property
@@ -404,13 +481,14 @@ def getKeyDefinition(key, source, section = None):
             try:
                 found = SUPPLEMENT_FILES[file][_key]
             except KeyError:
-                with open(file+'.csv') as f:
+                with xlrd.open_workbook(file+'.xls') as f:
+                    sheet = f.sheet_by_index(0)
+                    sheet.cell_value(0,0)
                     
-                    SUPPLEMENT_FILES[file] = defaultdict(list)
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        for k, v in row.items():
-                            SUPPLEMENT_FILES[file][k].append(v)
+                    SUPPLEMENT_FILES[file] = {}
+                    for col in range(sheet.ncols):
+                        col = sheet.col_values(col)
+                        SUPPLEMENT_FILES[file][col[0]] = col[1:]
                 found = SUPPLEMENT_FILES[file][_key]
 
     if truncate:
@@ -424,12 +502,24 @@ def getKeyDefinition(key, source, section = None):
         if found:
             key = found
         else:
-            key = math[0][0] if math[0][0].isdigit() else searchSource(math[0][0], source) or searchConfig(math[0][0], section) 
+            if math[0][0].isdigit():
+                key = math[0][0]
+            else:
+                key = searchSource(math[0][0], source) or searchConfig(math[0][0], section)
+                if key == 'ERROR':
+                    key = None                
                 
         op, qty = math[0][1:]
         return (key, op, qty)
     else:
-        return truncateValues(found or searchSource(key, source) or searchConfig(key, section), start, end)
+        if found:
+            return truncateValues(found, start, end)
+        else:
+            toReturn = searchSource(key, source) or searchConfig(key, section)
+            if toReturn == 'ERROR':
+                return None
+            else:
+                return truncateValues(toReturn, start, end)
 
 def parseForRequiredKeys(template):
     return re.findall('{(.*?)}', template)
@@ -484,7 +574,10 @@ def buildValueDict(source, template, injectSection = None):
     return valueDict
 
 def getBySerial(sn):
-    return DEVICES[sn.lower()]
+    return searchSource(sn.lower(), DEVICES)
+
+def getByHostname(hostname):
+    return searchSource(hostname.lower(), HOST_TO_DEVICE)
 
 class Math():
     def __init__(self, start, op, qty):
@@ -575,7 +668,7 @@ class Configlet():
                     #don't modify existing i; this is to sanitize and replace invalid keys in the format function
                     for x, key in enumerate(keys, 0):
                         x = 'i'+str(x)
-                        _template = _template.replace(key, x)
+                        _template = _template.replace('{'+key+'}', '{'+x+'}')
                         _keys.append(x)
                         
 
@@ -676,7 +769,7 @@ class Configlet():
         _keys = []
         for i, key in enumerate(valueDict.keys(), 0):
             i = 'i'+str(i)
-            baseTemplate = baseTemplate.replace(key, i)
+            baseTemplate = baseTemplate.replace('{'+key+'}', '{'+i+'}')
             _keys.append(i)
         try:
             baseTemplate = baseTemplate.format(**dict(zip(_keys, valueDict.values())))
@@ -761,15 +854,19 @@ def loadDevices(injectSection = None):
                 ASSIGN_TO.append(DEVICES[sn])
             
     elif mode == 'day1':
-        with open("fabric_parameters.csv") as f:
-            reader = csv.reader(f)
-            headers = [header.lower() for header in next(reader)]
+        with xlrd.open_workbook("fabric_parameters.xls") as f:
+            sheet = f.sheet_by_index(0)
+            sheet.cell_value(0,0)
+                
+            headers = [val.lower() for val in sheet.row_values(0)]
+
             #row[0] is the serial
             #passing a dict to the switch to preserve csv headers
-            for row in reader:
-                sn = row[0].lower()
+            for row in range(1, sheet.nrows):
+                sn_index = headers.index("sn")
                 role_index = headers.index("role")
-                
+                row = sheet.row_values(row)
+                sn = row[sn_index].lower()
                 DEVICES[sn] = Switch(dict(zip(headers,row)), CVP.getBySerial(sn), injectSection)
                 HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
                 if row[role_index].lower() == "spine":
@@ -793,9 +890,9 @@ class Manager():
                     template = TEMPLATES[template]
                     device.assign_configlet(template)
                 if device.role == "spine":
-                    self.tasks_to_deploy.append(Task(device))
+                    self.tasks_to_deploy.append(Task(device, mode = 1))
                 else:
-                    self.tasks_to_deploy.insert(0,Task(device))
+                    self.tasks_to_deploy.insert(0,Task(device, mode = 1))
             
         elif mode == 'day2':
             singleton = searchConfig('singleton', section)
@@ -803,7 +900,7 @@ class Manager():
             if singleton:
                 for template in recipe:
                     template = TEMPLATES[template]
-                    self.tasks_to_deploy.append(Task(template = template))
+                    self.tasks_to_deploy.append(Task(template = template, mode = 2))
             else:
                                 
                 for device in COMPILE_FOR:                
@@ -811,9 +908,9 @@ class Manager():
                         template = TEMPLATES[template]
                         device.assign_configlet(template)
                     if device.role == "spine":
-                        self.tasks_to_deploy.append(Task(device))
+                        self.tasks_to_deploy.append(Task(device, mode = 2))
                     else:
-                        self.tasks_to_deploy.insert(0,Task(device))
+                        self.tasks_to_deploy.insert(0,Task(device, mode = 2))
             
         for task in self.tasks_to_deploy:
             task.execute()
