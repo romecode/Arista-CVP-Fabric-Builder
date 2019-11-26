@@ -10,8 +10,6 @@ import datetime
 import xlrd
 from itertools import chain
 
-
-
 LOGGER = None
 CVP = None
 CONFIG = {}
@@ -22,7 +20,6 @@ ASSIGN_TO = []
 HOST_TO_DEVICE = {}
 SUPPLEMENT_FILES = {}
 SPINES = []
-
 
 class Log():
     def __init__(self):
@@ -52,7 +49,6 @@ class Cvp():
         except ImportError:
             LOGGER.log("Unable to find the CVPRAC module")
             
-        
         try:
             self.containers = self.cvprac.api.get_containers()['data']
             for cont in self.containers:
@@ -64,7 +60,7 @@ class Cvp():
             
         except:
             LOGGER.log("Unable to connect to CVP Server")
-            #sys.exit(0)
+            sys.exit(0)
             
     def applyConfiglets(self, to, configlets):
         app_name = "CVP Configlet Builder"
@@ -148,13 +144,22 @@ class Cvp():
                 LOGGER.log("Deploying device {0}: {1} to {2} container with task id {3}".format(device.sn, device.mgmt_ip, device.container, ids))
         else:
             return None
-            
-    def getTelemetry(self, sn, query):
-        query = '/api/v1/rest/{0}{1}'.format(sn, query)
-        return self.cvprac.get(query)
         
-    def parseTelemetry(self, response, key):
-        pass
+    def fetchDevices(self, search, follow_child_containers = False):
+        search = search if type(search) == list else [search]
+        devices = []
+        for _search in search:
+            
+            try:
+                device = CVP.getBySerial(_search) or CVP.getByHostname(_search)
+                if device:
+                    devices.append((device,))
+                    continue
+                else:
+                    devices.append(CVP.getContainerDevices(_search, follow_child_containers))
+            except KeyError as E:
+                LOGGER.log("Could not find {0}".format(_search))
+        return list(chain.from_iterable(devices))
         
 class Task():
     def __init__(self, device = None, template = None, mode = None):
@@ -162,6 +167,7 @@ class Task():
         self.template = template
         self.singleton = True if template else False
         self.mode = mode
+        
     #the task finally figures out what to assign and compile
     def execute(self):
         debug = searchConfig('debug')
@@ -192,8 +198,6 @@ class Task():
                 print compiled
                 return
             
-            
-            
             createdConf = CVP.addOrUpdateConfiglet(name, compiled)
             
             createdTasks = CVP.applyConfiglets(assign_to, createdConf) if assign_to else []
@@ -218,18 +222,13 @@ class Task():
 
             #devies are undefined
             if not debug:
-                print self.device.sn
                 if self.mode == 2 and ASSIGN_TO:
-
                     if self.device.cvp in ASSIGN_TO:
                         pushToCvp()
                 else:
                     pushToCvp()
-                    
             
-            self.device.to_deploy = []    
-        
-            
+            self.device.to_deploy = []           
 
 class Switch():
     
@@ -320,9 +319,9 @@ class Switch():
             return self.searchConfig('reload_delay')[1]
     
     @property
-    def underlay_bgp(self):
+    def underlay(self):
         
-        template = TEMPLATES.get('underlay_bgp')
+        template = TEMPLATES.get('underlay_template_private')
         i = 0
         
         if len(self.underlay_inject):
@@ -382,203 +381,6 @@ class Switch():
     def ibgp_peer_address(self):
         return ip_address(unicode(self.searchConfig('ibgp_ip'))) + 1
     
-def fetchDevices(search, follow_child_containers = False):
-    search = search if type(search) == list else [search]
-    devices = []
-    for _search in search:
-        
-        try:
-            device = CVP.getBySerial(_search) or CVP.getByHostname(_search)
-            if device:
-                devices.append((device,))
-                continue
-            else:
-                devices.append(CVP.getContainerDevices(_search, follow_child_containers))
-        except KeyError as E:
-            LOGGER.log("Could not find {0}".format(_search))
-    return list(chain.from_iterable(devices))   
-                  
-                
-#HELPER FN FOR DEALING WITH OPTIONS IN BASE CONFIGLET TEMPLATES                    
-#used to fetch all the required variables defined in related_templates
-#from either a device or global config
-#logs error for specific failed value and current option
-    
-        
-#get if dict, getattr if else
-def searchSource(key, source, default = None):
-    return source.get(key, default) if type(source) is dict else getattr(source, key, default)
-
-def searchConfig(key, section = None):
-    config = None
-        
-    if section:
-        try:
-            config = CONFIG.get(section, key)
-        except:
-            pass
-    if not config:
-        try:
-            config = CONFIG.get('global', key)
-        except:
-            return None
-
-    if config.startswith('[') and config.endswith(']'):
-        return [v.strip() for v in config[1:-1].split('|') if v]
-        
-    if config == 'True':
-        return True
-    if config == 'False':
-        return False
-    
-    return config
-
-def getKeyDefinition(key, source, section = None):
-    
-    csv_telemetry_source = key.split('#')
-    found = None
-    truncate = None
-    
-    math = parseForMath(key)
-    if not math:
-        key, truncate = parseForTruncation(key)[0]
-    else:
-        key = math[0][0]
-    
-    def truncateValues(values, start = None, end = None):
-        if type(values) == list:
-            return [str(val)[start:end] for val in values]
-        else:
-            return str(values)[start:end]
-
-    if len(csv_telemetry_source) == 2:
-        
-        file = csv_telemetry_source[0]
-        _key = csv_telemetry_source[1]
-        
-        math = parseForMath(_key)
-        if not math:
-            _key, truncate = parseForTruncation(_key)[0]
-        else:
-            _key = math[0][0]
-        
-        if file.startswith('/') and hasattr(CVP, 'cvprac'):
-            #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
-            found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
-            try:
-                found = found['notifications'][0]['updates'][_key]['value']
-                __keys = found.keys()
-                if 'Value' in __keys:
-                    found = found['Value']
-                elif 'value' in __keys:
-                    found = found['value']
-                _type, val = found.items()[0]
-                found = val
-            except:
-                pass
-        else:
-            global SUPPLEMENT_FILES
-            try:
-                found = SUPPLEMENT_FILES[file][_key]
-            except KeyError:
-                with xlrd.open_workbook(file+'.xls') as f:
-                    sheet = f.sheet_by_index(0)
-                    sheet.cell_value(0,0)
-                    
-                    SUPPLEMENT_FILES[file] = {}
-                    for col in range(sheet.ncols):
-                        col = sheet.col_values(col)
-                        SUPPLEMENT_FILES[file][col[0]] = col[1:]
-                found = SUPPLEMENT_FILES[file][_key]
-
-    if truncate:
-        start, end = truncate[1:-1].split(':')
-        start = int(start) if start else None
-        end = int(end) if end else None
-    else:
-        start, end = (None, None)
-    
-    if math:
-        if found:
-            key = found
-        else:
-            if math[0][0].isdigit():
-                key = math[0][0]
-            else:
-                key = searchSource(math[0][0], source) or searchConfig(math[0][0], section)
-                if key == 'ERROR':
-                    key = None                
-                
-        op, qty = math[0][1:]
-        return (key, op, qty)
-    else:
-        if found:
-            return truncateValues(found, start, end)
-        else:
-            toReturn = searchSource(key, source) or searchConfig(key, section)
-            if toReturn == 'ERROR':
-                return None
-            else:
-                return truncateValues(toReturn, start, end)
-
-def parseForRequiredKeys(template):
-    return re.findall('{(.*?)}', template)
-
-def parseForIterables(template):
-    return re.findall('\[[\s\S]*?\](?!else)', template)
-
-def parseForSections(template):
-    return re.findall('(@[\s\S]*?@)({.*?})*', template)
-
-def parseForTruncation(key):
-    return re.findall('([\w]+)(\([-+]?\d*:[-+]?\d*\))?', key)
-
-def parseForMath(key):
-    return re.findall('(\w+)([+\-*]+)(\d+)?', key)
-
-#builds a tuple of values followed by a comparator lambda
-#used to check if tests pass while supporting section injections from the global variable space
-
-def buildConditionTest(keys):
-    condition_list = []
-    _keys = keys.split('|')
-    for key in _keys:
-        key = re.split('([^a-z0-9A-Z_]+)', key)
-        if len(key) > 1:
-            condition = key[1]
-            if condition == '=':
-                condition_fn = lambda key, value, source = None, section = None : value == getKeyDefinition(key, source, section)
-            else:
-                condition_fn = lambda key, value, source = None, section = None : value != getKeyDefinition(key, source, section)
-            condition_list.append( ((key[0], key[2]), condition_fn) )
-        else:
-            condition_list.append( ((key[0],), lambda key, source = None, section = None : bool(getKeyDefinition(key, source, section))) )
-    return condition_list
-
-def buildValueDict(source, template, injectSection = None):
-    valueDict = {}
-    valueDict['error'] = []
-    
-    keys = parseForRequiredKeys(template)
-
-    for key in keys:
-        #check if dict already has defined
-        if valueDict.get(key, None):
-            continue
-        
-        defined = getKeyDefinition(key, source, injectSection)
-        if not defined:
-            valueDict['error'].append(key)
-        else:
-            valueDict[key] = defined
-    return valueDict
-
-def getBySerial(sn):
-    return searchSource(sn.lower(), DEVICES)
-
-def getByHostname(hostname):
-    return searchSource(hostname.lower(), HOST_TO_DEVICE)
-
 class Math():
     def __init__(self, start, op, qty):
         self.iter = None
@@ -779,99 +581,8 @@ class Configlet():
             #we will usually get here if the parent configlet requires device @property functions but the 
             return ' '
 
-        return baseTemplate.replace("~","\t").strip()
-
-def buildGlobalData(injectSection = None):
-    #INIT CONFIG
-    loadConfig()
-    #INIT TEMPLATES
-    loadTemplates(injectSection)
-    #INIT FABRIC CSV
-    loadDevices(injectSection)
-      
-def loadConfig():
-    global CONFIG
-    CONFIG = {} 
-    CONFIG = SafeConfigParser()
-    CONFIG.read('global.conf')
-    
-def loadTemplates(injectSection = None):
-    global TEMPLATES
-    TEMPLATES = {}
-    parser = SafeConfigParser()
-    parser.read('templates.conf')
-    for sectionName in parser.sections():
-        TEMPLATES[sectionName] = Configlet(sectionName, dict(parser.items(sectionName)), injectSection)
-    
-def loadDevices(injectSection = None):
-
-    global DEVICES
-    global SPINES
-    global ASSIGN_TO
-    global COMPILE_FOR
-    global HOST_TO_DEVICE
-
-    
-    DEVICES = {}
-    SPINES = []
-    ASSIGN_TO = []
-    COMPILE_FOR = []
-    HOST_TO_DEVICE = {}
-    
-    mode = searchConfig('mode', injectSection)
-        
-
-    if mode == 'day2':
-        spines = searchConfig('spines', injectSection)
-        leafs = searchConfig('leafs', injectSection)
-        compile_for = searchConfig('compile_for', injectSection)
-        assign_to = searchConfig('assign_to', injectSection)
-        
-        follow_child_containers = searchConfig('follow_child_containers', injectSection)
-        
-        spines = fetchDevices(spines, follow_child_containers) if spines else []
-        leafs = fetchDevices(leafs, follow_child_containers) if leafs else []
-        compile_for = fetchDevices(compile_for, follow_child_containers) if compile_for else []
-        assign_to = fetchDevices(assign_to, follow_child_containers) if assign_to else []
-        
-        #build the master list and label the implicit role for day2, since we don't know what's what
-        for sn, device in CVP.devices.items():
-            
-            implicitRole = None
-            if device in leafs:
-                implicitRole = 'leaf'
-            elif device in spines:
-                implicitRole = 'spine'
-                
-            DEVICES[sn] = Switch(device, device, injectSection, implicitRole)
-            HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
-            
-            if implicitRole == 'spine':
-                SPINES.append(DEVICES[sn])
-            if device in compile_for:
-                COMPILE_FOR.append(DEVICES[sn])
-            if device in assign_to:
-                ASSIGN_TO.append(DEVICES[sn])
-            
-    elif mode == 'day1':
-        with xlrd.open_workbook("fabric_parameters.xls") as f:
-            sheet = f.sheet_by_index(0)
-            sheet.cell_value(0,0)
-                
-            headers = [val.lower() for val in sheet.row_values(0)]
-
-            #row[0] is the serial
-            #passing a dict to the switch to preserve csv headers
-            for row in range(1, sheet.nrows):
-                sn_index = headers.index("sn")
-                role_index = headers.index("role")
-                row = sheet.row_values(row)
-                sn = row[sn_index].lower()
-                DEVICES[sn] = Switch(dict(zip(headers,row)), CVP.getBySerial(sn), injectSection)
-                HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
-                if row[role_index].lower() == "spine":
-                    SPINES.append(DEVICES[sn])
-    
+        return baseTemplate.replace("~","\t").strip()   
+  
 class Manager():
     
     def __init__(self):
@@ -950,7 +661,271 @@ class FabricBuilder(cmd.Cmd):
         getBySerial(args[0]).compile_configlet(TEMPLATES[args[1]])
         
     def do_EOF(self, line):
+        return True        
+
+#get if dict, getattr if else
+def searchSource(key, source, default = None):
+    return source.get(key, default) if type(source) is dict else getattr(source, key, default)
+
+def searchConfig(key, section = None):
+    config = None
+        
+    if section:
+        try:
+            config = CONFIG.get(section, key)
+        except:
+            pass
+    if not config:
+        try:
+            config = CONFIG.get('global', key)
+        except:
+            return None
+
+    if config.startswith('[') and config.endswith(']'):
+        return [v.strip() for v in config[1:-1].split('|') if v]
+        
+    if config == 'True':
         return True
+    if config == 'False':
+        return False
+    
+    return config
+
+def getKeyDefinition(key, source, section = None):
+    
+    csv_telemetry_source = key.split('#')
+    found = None
+    truncate = None
+    
+    math = parseForMath(key)
+    if not math:
+        key, truncate = parseForTruncation(key)[0]
+    else:
+        key = math[0][0]
+    
+    def truncateValues(values, start = None, end = None):
+        if type(values) == list:
+            return [str(val)[start:end] for val in values]
+        else:
+            return str(values)[start:end]
+
+    if len(csv_telemetry_source) == 2:
+        
+        file = csv_telemetry_source[0]
+        _key = csv_telemetry_source[1]
+        
+        math = parseForMath(_key)
+        if not math:
+            _key, truncate = parseForTruncation(_key)[0]
+        else:
+            _key = math[0][0]
+        
+        if file.startswith('/') and hasattr(CVP, 'cvprac'):
+            #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
+            found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
+            try:
+                found = found['notifications'][0]['updates'][_key]['value']
+                __keys = found.keys()
+                if 'Value' in __keys:
+                    found = found['Value']
+                elif 'value' in __keys:
+                    found = found['value']
+                _type, val = found.items()[0]
+                found = val
+            except:
+                pass
+        else:
+            global SUPPLEMENT_FILES
+            try:
+                found = SUPPLEMENT_FILES[file][_key]
+            except KeyError:
+                with xlrd.open_workbook(file+'.xls') as f:
+                    sheet = f.sheet_by_index(0)
+                    sheet.cell_value(0,0)
+                    
+                    SUPPLEMENT_FILES[file] = {}
+                    for col in range(sheet.ncols):
+                        col = sheet.col_values(col)
+                        SUPPLEMENT_FILES[file][col[0]] = col[1:]
+                found = SUPPLEMENT_FILES[file][_key]
+
+    if truncate:
+        start, end = truncate[1:-1].split(':')
+        start = int(start) if start else None
+        end = int(end) if end else None
+    else:
+        start, end = (None, None)
+    
+    if math:
+        if found:
+            key = found
+        else:
+            if math[0][0].isdigit():
+                key = math[0][0]
+            else:
+                key = searchSource(math[0][0], source) or searchConfig(math[0][0], section)
+                if key == 'ERROR':
+                    key = None                
+                
+        op, qty = math[0][1:]
+        return (key, op, qty)
+    else:
+        if found:
+            return truncateValues(found, start, end)
+        else:
+            toReturn = searchSource(key, source) or searchConfig(key, section)
+            if toReturn == 'ERROR':
+                return None
+            else:
+                return truncateValues(toReturn, start, end)
+
+def parseForRequiredKeys(template):
+    return re.findall('{(.*?)}', template)
+
+def parseForIterables(template):
+    return re.findall('\[[\s\S]*?\](?!else)', template)
+
+def parseForSections(template):
+    return re.findall('(@[\s\S]*?@)({.*?})*', template)
+
+def parseForTruncation(key):
+    return re.findall('([\w]+)(\([-+]?\d*:[-+]?\d*\))?', key)
+
+def parseForMath(key):
+    return re.findall('(\w+)([+\-*]+)(\d+)?', key)
+
+#builds a tuple of values followed by a comparator lambda
+#used to check if tests pass while supporting section injections from the global variable space
+def buildConditionTest(keys):
+    condition_list = []
+    _keys = keys.split('|')
+    for key in _keys:
+        key = re.split('([^a-z0-9A-Z_]+)', key)
+        if len(key) > 1:
+            condition = key[1]
+            if condition == '=':
+                condition_fn = lambda key, value, source = None, section = None : value == getKeyDefinition(key, source, section)
+            else:
+                condition_fn = lambda key, value, source = None, section = None : value != getKeyDefinition(key, source, section)
+            condition_list.append( ((key[0], key[2]), condition_fn) )
+        else:
+            condition_list.append( ((key[0],), lambda key, source = None, section = None : bool(getKeyDefinition(key, source, section))) )
+    return condition_list
+
+def buildValueDict(source, template, injectSection = None):
+    valueDict = {}
+    valueDict['error'] = []
+    
+    keys = parseForRequiredKeys(template)
+
+    for key in keys:
+        #check if dict already has defined
+        if valueDict.get(key, None):
+            continue
+        
+        defined = getKeyDefinition(key, source, injectSection)
+        if not defined:
+            valueDict['error'].append(key)
+        else:
+            valueDict[key] = defined
+    return valueDict
+
+def getBySerial(sn):
+    return searchSource(sn.lower(), DEVICES)
+
+def getByHostname(hostname):
+    return searchSource(hostname.lower(), HOST_TO_DEVICE)
+
+def buildGlobalData(injectSection = None):
+    #INIT CONFIG
+    loadConfig()
+    #INIT TEMPLATES
+    loadTemplates(injectSection)
+    #INIT FABRIC CSV
+    loadDevices(injectSection)
+      
+def loadConfig():
+    global CONFIG
+    CONFIG = {} 
+    CONFIG = SafeConfigParser()
+    CONFIG.read('global.conf')
+    
+def loadTemplates(injectSection = None):
+    global TEMPLATES
+    TEMPLATES = {}
+    parser = SafeConfigParser()
+    parser.read('templates.conf')
+    for sectionName in parser.sections():
+        TEMPLATES[sectionName] = Configlet(sectionName, dict(parser.items(sectionName)), injectSection)
+    
+def loadDevices(injectSection = None):
+
+    global DEVICES
+    global SPINES
+    global ASSIGN_TO
+    global COMPILE_FOR
+    global HOST_TO_DEVICE
+
+    
+    DEVICES = {}
+    SPINES = []
+    ASSIGN_TO = []
+    COMPILE_FOR = []
+    HOST_TO_DEVICE = {}
+    
+    mode = searchConfig('mode', injectSection)
+        
+
+    if mode == 'day2':
+        spines = searchConfig('spines', injectSection)
+        leafs = searchConfig('leafs', injectSection)
+        compile_for = searchConfig('compile_for', injectSection)
+        assign_to = searchConfig('assign_to', injectSection)
+        
+        follow_child_containers = searchConfig('follow_child_containers', injectSection)
+        
+        spines = CVP.fetchDevices(spines, follow_child_containers) if spines else []
+        leafs = CVP.fetchDevices(leafs, follow_child_containers) if leafs else []
+        compile_for = CVP.fetchDevices(compile_for, follow_child_containers) if compile_for else []
+        assign_to = CVP.fetchDevices(assign_to, follow_child_containers) if assign_to else []
+        
+        #build the master list and label the implicit role for day2, since we don't know what's what
+        for sn, device in CVP.devices.items():
+            
+            implicitRole = None
+            if device in leafs:
+                implicitRole = 'leaf'
+            elif device in spines:
+                implicitRole = 'spine'
+                
+            DEVICES[sn] = Switch(device, device, injectSection, implicitRole)
+            HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
+            
+            if implicitRole == 'spine':
+                SPINES.append(DEVICES[sn])
+            if device in compile_for:
+                COMPILE_FOR.append(DEVICES[sn])
+            if device in assign_to:
+                ASSIGN_TO.append(DEVICES[sn])
+            
+    elif mode == 'day1':
+        with xlrd.open_workbook("fabric_parameters.xls") as f:
+            sheet = f.sheet_by_index(0)
+            sheet.cell_value(0,0)
+                
+            headers = [val.lower() for val in sheet.row_values(0)]
+
+            #row[0] is the serial
+            #passing a dict to the switch to preserve csv headers
+            for row in range(1, sheet.nrows):
+                sn_index = headers.index("sn")
+                role_index = headers.index("role")
+                row = sheet.row_values(row)
+                sn = row[sn_index].lower()
+                DEVICES[sn] = Switch(dict(zip(headers,row)), CVP.getBySerial(sn), injectSection)
+                HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
+                if row[role_index].lower() == "spine":
+                    SPINES.append(DEVICES[sn])
     
 def debug():
     #INIT CONFIG
