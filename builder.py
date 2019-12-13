@@ -123,6 +123,7 @@ class Cvp():
                 LOGGER.log("Found configlet {0}".format(configlet_name))
                 if configlet['config'] != configlet_content:
                     LOGGER.log("Updating configlet {0}; please wait...".format(configlet_name))
+                    
                     result = self.cvprac.api.update_configlet(configlet_content, configlet['key'], configlet_name)
             
             return self.cvprac.api.get_configlet_by_name(configlet_name)
@@ -133,15 +134,15 @@ class Cvp():
         if self.cvprac:
             try:
                 
-                if device.cvp['provisioned']:
-                    ids = self.cvprac.api.apply_configlets_to_device('fabric_builder', device, configlets_to_deploy)
-                else:
-                    ids = self.cvprac.api.deploy_device(device, container, configlets_to_deploy)
+                #if device.cvp['provisioned']:
+                #    ids = self.cvprac.api.apply_configlets_to_device('fabric_builder', device.cvp, configlets_to_deploy)
+                #else:
+                ids = self.cvprac.api.deploy_device(device.cvp, container, configlets_to_deploy)
 
             except self.CvpApiError as err:
                 LOGGER.log("Deploying device {0}: failed, could not get task id from CVP".format(device.sn))
             else:
-                LOGGER.log("Deploying device {0}: {1} to {2} container with task id {3}".format(device.sn, device.mgmt_ip, device.container, ids))
+                LOGGER.log("Deploying device {0}: {1} to {2} container with task id {3}".format(device.sn, device.mgmt_ip, device.container, ','.join(map(str, ids['data']['taskIds']))))
         else:
             return None
         
@@ -172,16 +173,17 @@ class Task():
     def execute(self):
         debug = searchConfig('debug')
         created_keys = []
+        apply_configlets = searchConfig('apply_configlets')
         
         def pushToCvp():
             if self.device.cvp['containerName'] == 'Undefined' and searchSource('container', self.device):
-                print 'DEPLOY DEVICE'
-                #CVP.deployDevice(self.device.cvp, self.device.container, configlet_keys)
+                #print 'DEPLOY DEVICE'
+                CVP.deployDevice(self.device, self.device.container, configlet_keys)
             elif self.device.cvp['containerName'] == 'Undefined' and not searchSource('container', self.device):
                 LOGGER.log("Cannot deploy {0}; non-provisioned device with no destination container defined".format(self.device.sn.upper()))
             else:
-                print "APPLY CONFIGLETS"
-                #CVP.applyConfiglets(self.device.cvp, configlet_keys)
+                #print "APPLY CONFIGLETS"
+                CVP.applyConfiglets(self.device.sn, configlet_keys)
                 
         if self.singleton:
             #deal with singletons
@@ -199,10 +201,10 @@ class Task():
                 return
             
             createdConf = CVP.addOrUpdateConfiglet(name, compiled)
-            
-            createdTasks = CVP.applyConfiglets(assign_to, createdConf) if assign_to else []
-            if createdTasks:
-                LOGGER.log("Successfully created tasks {0}".format(','.join(map(str, createdTasks))))
+            if apply_configlets:
+                createdTasks = CVP.applyConfiglets(assign_to, createdConf) if assign_to else []
+                if createdTasks:
+                    LOGGER.log("Successfully created tasks {0}".format(','.join(map(str, createdTasks))))
 
      
         else:
@@ -220,8 +222,8 @@ class Task():
                 
                 configlet_keys.append(CVP.addOrUpdateConfiglet(name, configlet.compile(self.device)))
 
-            #devies are undefined
-            if not debug:
+            #devices are undefined
+            if not debug and apply_configlets:
                 if self.mode == 2 and ASSIGN_TO:
                     if self.device.cvp in ASSIGN_TO:
                         pushToCvp()
@@ -240,6 +242,7 @@ class Switch():
         self.cvp = None
         for k, v in params.items():
             setattr(self, k, str(v).replace("|",","))
+        
             
         self.sn = (searchSource('serialNumber', self) or searchSource('sn', self)).lower()
         
@@ -286,8 +289,8 @@ class Switch():
     def mlag_address(self):
         try:
             neighbor = getByHostname(self.mlag_neighbor)
-            mgmt_ip = ip_address(unicode(self.mgmt_ip))
-            neighbor_mgmt = ip_address(unicode(neighbor.mgmt_ip))
+            mgmt_ip = ip_address(unicode(self.mgmt_ip[:-3]))
+            neighbor_mgmt = ip_address(unicode(neighbor.mgmt_ip[:-3]))
             global_mlag_address = ip_address(unicode(self.searchConfig('mlag_address')))
             if mgmt_ip > neighbor_mgmt:
                 return global_mlag_address + 1
@@ -321,7 +324,7 @@ class Switch():
     @property
     def underlay(self):
         
-        template = TEMPLATES.get('underlay_template_private')
+        template = TEMPLATES.get('underlay_private')
         i = 0
         
         if len(self.underlay_inject):
@@ -378,8 +381,9 @@ class Switch():
         return [spine.hostname for spine in SPINES]
     
     @property
-    def ibgp_peer_address(self):
-        return ip_address(unicode(self.searchConfig('ibgp_ip'))) + 1
+    def vrf_ibgp_peer_address(self):
+        ip = self.searchConfig('vrf_ibgp_ip')
+        return ip_address(unicode(ip)) + 1 if ip else 'ERROR'
     
 class Math():
     def __init__(self, start, op, qty):
@@ -467,7 +471,7 @@ class Configlet():
                     #sanitize format syntax from templates and replase actual keys with positionals        
                     _keys = []
                     
-                    #don't modify existing i; this is to sanitize and replace invalid keys in the format function
+                    #don't modify existing i; this is to sanitize and replace invalid keys for the format function used later
                     for x, key in enumerate(keys, 0):
                         x = 'i'+str(x)
                         _template = _template.replace('{'+key+'}', '{'+x+'}')
@@ -515,6 +519,7 @@ class Configlet():
             #test the "tests" arguments i.e @...@{tests}
             #parseCondition returns a (value, function) tuple the fn(value) will return true/false if the test passes
             #here we collect the key which failed a test
+
             failedTests = [v[0] for v, fn in buildConditionTest(_test.strip('{}')) if not fn(*v, source = source, section = self.injectSection)]
             
             if _test and not (failedTests or errorIterables):
@@ -523,7 +528,7 @@ class Configlet():
                     __section = __section.replace(toReplace, compiled)        
             elif _test and failedTests:
                 #there is a test but failed WIPE
-                LOGGER.log("Error building configlet section {0} in {1}: test condition for {2} failed".format(
+                LOGGER.log("---skipping configlet section {0} in {1}: test condition for {2} failed".format(
                     _section.replace('\n','')[:15],
                     self.name,
                     ','.join(failedTests)
@@ -536,7 +541,7 @@ class Configlet():
             else:
                 #no test, iterables failed WIPE
                 for toReplace, errorKeys in errorIterables:
-                    LOGGER.log("Error building configlet section {0} in {1}: iterations failed on {2}".format(
+                    LOGGER.log("---skipping configlet section {0} in {1}: iterations failed on {2}".format(
                         _section.replace('\n','')[:15],
                         self.name,
                         ','.join(errorKeys)
@@ -549,7 +554,7 @@ class Configlet():
         compiledIterables = self.compileIterables(source, baseTemplate)
         errorIterables = compiledIterables.pop('error')
         for toReplace, errorKeys in errorIterables:
-            LOGGER.log("Pruned configlet option {0} in {1}: variable {2} undefined".format(
+            LOGGER.log("---skipping configlet option {0} in {1}: variable {2} undefined".format(
                         toReplace.replace('\n','')[:15] + '...',
                         self.name,
                         ','.join(errorKeys)
@@ -655,11 +660,6 @@ class FabricBuilder(cmd.Cmd):
         buildGlobalData(section)
         MANAGER.deploy(section)
         
-    def do_test(self, line):
-        args = line.split(',')
-        buildGlobalData(args[2] if 2 < len(args) else None)
-        getBySerial(args[0]).compile_configlet(TEMPLATES[args[1]])
-        
     def do_EOF(self, line):
         return True        
 
@@ -669,15 +669,14 @@ def searchSource(key, source, default = None):
 
 def searchConfig(key, section = None):
     config = None
-        
     if section:
         try:
-            config = CONFIG.get(section, key)
+            config = CONFIG.get(section, key).strip()
         except:
             pass
-    if not config:
+    if config == None:
         try:
-            config = CONFIG.get('global', key)
+            config = CONFIG.get('global', key).strip()
         except:
             return None
 
@@ -688,11 +687,12 @@ def searchConfig(key, section = None):
         return True
     if config == 'False':
         return False
-    
+
     return config
 
 def getKeyDefinition(key, source, section = None):
-    
+    #order matters here
+    #this whole thing is really bad FIXIT
     csv_telemetry_source = key.split('#')
     found = None
     truncate = None
@@ -746,6 +746,7 @@ def getKeyDefinition(key, source, section = None):
                     SUPPLEMENT_FILES[file] = {}
                     for col in range(sheet.ncols):
                         col = sheet.col_values(col)
+                        col = [int(v) if type(v) == float else v for v in col]
                         SUPPLEMENT_FILES[file][col[0]] = col[1:]
                 found = SUPPLEMENT_FILES[file][_key]
 
@@ -764,7 +765,7 @@ def getKeyDefinition(key, source, section = None):
                 key = math[0][0]
             else:
                 key = searchSource(math[0][0], source) or searchConfig(math[0][0], section)
-                if key == 'ERROR':
+                if key == 'ERROR' or not key:
                     key = None                
                 
         op, qty = math[0][1:]
@@ -774,7 +775,7 @@ def getKeyDefinition(key, source, section = None):
             return truncateValues(found, start, end)
         else:
             toReturn = searchSource(key, source) or searchConfig(key, section)
-            if toReturn == 'ERROR':
+            if toReturn == 'ERROR' or not toReturn:
                 return None
             else:
                 return truncateValues(toReturn, start, end)
@@ -799,6 +800,7 @@ def parseForMath(key):
 def buildConditionTest(keys):
     condition_list = []
     _keys = keys.split('|')
+    
     for key in _keys:
         key = re.split('([^a-z0-9A-Z_]+)', key)
         if len(key) > 1:
@@ -809,6 +811,7 @@ def buildConditionTest(keys):
                 condition_fn = lambda key, value, source = None, section = None : value != getKeyDefinition(key, source, section)
             condition_list.append( ((key[0], key[2]), condition_fn) )
         else:
+            
             condition_list.append( ((key[0],), lambda key, source = None, section = None : bool(getKeyDefinition(key, source, section))) )
     return condition_list
 
