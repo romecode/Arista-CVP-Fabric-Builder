@@ -20,6 +20,7 @@ ASSIGN_TO = []
 HOST_TO_DEVICE = {}
 SUPPLEMENT_FILES = {}
 SPINES = []
+DEBUG = False
 
 class Log():
     def __init__(self):
@@ -37,57 +38,53 @@ class Cvp():
         self.containerTree = {}
         self.CvpApiError = None
         self.devices = {}
-        self.host_to_device = {}           
+        self.host_to_device = {}
+        self.containers = {}
+        self.configlets = {}
+        
         try:
             from cvprac.cvp_client import CvpClient
+            from cvprac.cvp_client_errors import CvpClientError
             from cvprac.cvp_client_errors import CvpApiError
+            self.CvpClientError = CvpClientError
             self.CvpApiError = CvpApiError
             self.cvprac = CvpClient()
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # to supress the warnings for https
             self.cvprac.connect([searchConfig('cvp_server')], searchConfig('cvp_user'), searchConfig('cvp_pass'))
             LOGGER.log("Successfully authenticated to CVP")
-        except ImportError:
-            LOGGER.log("Unable to find the CVPRAC module")
+        except (ImportError, self.CvpClientError), e:
+            LOGGER.log("Unable to Init CVP; forcing debug mode")
+            LOGGER.log("ERROR: {0}".format(e))
+            global DEBUG
+            DEBUG = True
             
+        
+    def populate(self):
+        
         try:
-            self.containers = self.cvprac.api.get_containers()['data']
-            for cont in self.containers:
-                self.containerTree[cont['name'].lower()] = [_cont['name'].lower() for _cont in self.containers if _cont['parentName'] == cont['name']]
-            self.containers = {_cont['name'].lower():_cont for _cont in self.containers}
+            LOGGER.log("-loading containers; please wait...")
+            self.containers = {item['name'].lower():item for item in self.cvprac.api.get_containers()['data']}
+            LOGGER.log("-loading configlets; please wait...")
+            self.configlets = {item['name'].lower():item for item in self.cvprac.api.get_configlets()['data']}
+            
+            for name, cont in self.containers.items():
+                self.containerTree[name] = [_name for _name, _cont in self.containers.items() if _cont['parentName'] == cont['name']]
+                
+            
+            LOGGER.log("-loading devices; please wait...")
             for device in self.cvprac.api.get_inventory():
-                self.devices[device['serialNumber'].lower()] = device
-                self.host_to_device[device['hostname'].lower()] = self.devices[device['serialNumber'].lower()]
+                sn = device['serialNumber'].lower()
+                host = device['hostname'].lower()
+                LOGGER.log("-loading device configlets; please wait...")
+                configlets = self.cvprac.api.get_configlets_by_device_id(device['systemMacAddress'])
+                device['configlets'] = {item['name'].lower():item for item in configlets}
+                
+                self.devices[sn] = device
+                self.host_to_device[host] = self.devices[sn]
             
         except:
             LOGGER.log("Unable to connect to CVP Server")
             sys.exit(0)
-            
-    def applyConfiglets(self, to, configlets):
-        app_name = "CVP Configlet Builder"
-        to = to if type(to) == list else [to]
-        configlets = configlets if type(configlets) == list else [configlets]
-        results = []
-        toContainer = None
-        toDevice = None
-        
-        #dest is a container, sn. or hostname string
-        for dest in to:
-            LOGGER.log("Pushing configlets to {0}; please wait...".format(dest))
-            toContainer = self.getContainerByName(dest)
-            if toContainer:
-                _result = self.cvprac.api.apply_configlets_to_container(app_name, toContainer, configlets)    
-            else:
-                #apply to device
-                toDevice = self.getBySerial(dest) or self.getByHostname(dest)
-                _result = self.cvprac.api.apply_configlets_to_device(app_name, toDevice, configlets) if toDevice else None
-            
-            if not (toDevice or toContainer):
-                errorOn = [_conf['name'] for _conf in configlets]
-                LOGGER.log("Failed to push {0}; {1} not found".format(','.join(errorOn), dest))
-            elif _result and _result['data']['status'] == 'success':
-                results.append(_result['data']['taskIds'])
-                
-        return list(chain.from_iterable(results))
     
     def getBySerial(self, sn):
         return self.devices.get(sn.lower(), None)
@@ -103,49 +100,6 @@ class Cvp():
         tree = [containerName] + self.containerTree[containerName] if follow else [containerName]
         return [device for device in self.devices.values() if device['containerName'].lower() in tree]
     
-    #returns key if successful
-    def addOrUpdateConfiglet(self, configlet_name, configlet_content):
-        # Check if we already have a configlet by this name
-        if self.cvprac:
-            
-            try:
-                
-                configlet = self.cvprac.api.get_configlet_by_name(configlet_name)
-            except self.CvpApiError as err:
-                if 'Entity does not exist' in err.msg:
-                    # Configlet doesn't exist let's create one
-                    LOGGER.log("Creating configlet {0}; please wait...".format(configlet_name))
-                    result = self.cvprac.api.add_configlet(configlet_name, configlet_content)
-                else:
-                    raise
-            else:
-                # Configlet does exist, let's update the content only if not the same (avoid empty task)
-                LOGGER.log("Found configlet {0}".format(configlet_name))
-                if configlet['config'] != configlet_content:
-                    LOGGER.log("Updating configlet {0}; please wait...".format(configlet_name))
-                    
-                    result = self.cvprac.api.update_configlet(configlet_content, configlet['key'], configlet_name)
-            
-            return self.cvprac.api.get_configlet_by_name(configlet_name)
-        else:
-            return None
-    
-    def deployDevice(self, device, container, configlets_to_deploy):
-        if self.cvprac:
-            try:
-                
-                #if device.cvp['provisioned']:
-                #    ids = self.cvprac.api.apply_configlets_to_device('fabric_builder', device.cvp, configlets_to_deploy)
-                #else:
-                ids = self.cvprac.api.deploy_device(device.cvp, container, configlets_to_deploy)
-
-            except self.CvpApiError as err:
-                LOGGER.log("Deploying device {0}: failed, could not get task id from CVP".format(device.sn))
-            else:
-                LOGGER.log("Deploying device {0}: {1} to {2} container with task id {3}".format(device.sn, device.mgmt_ip, device.container, ','.join(map(str, ids['data']['taskIds']))))
-        else:
-            return None
-        
     def fetchDevices(self, search, follow_child_containers = False):
         search = search if type(search) == list else [search]
         devices = []
@@ -161,6 +115,65 @@ class Cvp():
             except KeyError as E:
                 LOGGER.log("Could not find {0}".format(_search))
         return list(chain.from_iterable(devices))
+    
+    def createConfiglet(self, configlet_name, configlet_content):
+        # Configlet doesn't exist let's create one
+        LOGGER.log("--creating configlet {0}; please wait...".format(configlet_name))
+        self.cvprac.api.add_configlet(configlet_name, configlet_content)
+        return self.cvprac.api.get_configlet_by_name(configlet_name)
+                
+        
+    def updateConfiglet(self, configlet, new_configlet_content):
+        # Configlet does exist, let's update the content only if not the same (avoid empty task)
+        configlet_name = configlet['name']
+        LOGGER.log("--found configlet {0}".format(configlet_name))
+        if configlet['config'] != new_configlet_content:
+            LOGGER.log("---updating configlet {0}; please wait...".format(configlet_name))
+            self.cvprac.api.update_configlet(new_configlet_content, configlet['key'], configlet_name)
+        return self.cvprac.api.get_configlet_by_name(configlet_name)
+                
+    def deployDevice(self, device, container, configlets_to_deploy):
+        try:
+            ids = self.cvprac.api.deploy_device(device.cvp, container, configlets_to_deploy)
+        except self.CvpApiError as err:
+            LOGGER.log("---deploying device {0}: failed, could not get task id from CVP".format(device.hostname))
+        else:
+            ids = ','.join(map(str, ids['data']['taskIds']))
+            LOGGER.log("---deploying device {0}: {1} to {2} container".format(device.hostname, device.mgmt_ip, device.container))
+            LOGGER.log("---CREATED TASKS {0}".format(ids))
+            
+    def applyConfiglets(self, to, configlets):
+        app_name = "CVP Configlet Builder"
+        to = to if type(to) == list else [to]
+        configlets = configlets if type(configlets) == list else [configlets]
+        toContainer = None
+        toDevice = None
+        
+        #dest is a container, sn. or hostname string
+        for dest in to:
+            
+            toContainer = self.getContainerByName(dest)
+            if toContainer:
+                LOGGER.log("---applying configlets to {0}; please wait...".format(toContainer.name))
+                _result = self.cvprac.api.apply_configlets_to_container(app_name, toContainer, configlets)
+                dest = toContainer
+            else:
+                #apply to device
+                toDevice = getBySerial(dest) or getByHostname(dest)
+                dest = toDevice.hostname
+                LOGGER.log("---applying configlets to {0}; please wait...".format(dest))
+                _result = self.cvprac.api.apply_configlets_to_device(app_name, toDevice.cvp, configlets) if toDevice else None
+            
+            if not (toDevice or toContainer):
+                errorOn = [_conf['name'] for _conf in configlets]
+                LOGGER.log("---failed to push {0}; {1} not found".format(','.join(errorOn), dest))
+            elif _result and _result['data']['status'] == 'success':
+                
+                LOGGER.log("---CREATED TASKS {0}".format(','.join(map(str, _result['data']['taskIds']))))
+                
+                
+        return None    
+    
         
 class Task():
     def __init__(self, device = None, template = None, mode = None):
@@ -171,70 +184,112 @@ class Task():
         
     #the task finally figures out what to assign and compile
     def execute(self):
-        debug = searchConfig('debug')
-        created_keys = []
+        configlet_keys = []
         apply_configlets = searchConfig('apply_configlets')
         
         def pushToCvp():
-            if self.device.cvp['containerName'] == 'Undefined' and searchSource('container', self.device):
-                #print 'DEPLOY DEVICE'
-                CVP.deployDevice(self.device, self.device.container, configlet_keys)
-            elif self.device.cvp['containerName'] == 'Undefined' and not searchSource('container', self.device):
-                LOGGER.log("Cannot deploy {0}; non-provisioned device with no destination container defined".format(self.device.sn.upper()))
+            container = searchSource('container', self.device)
+            
+            if self.device.cvp['containerName'] == 'Undefined' and container:
+                CVP.deployDevice(self.device, container, configlet_keys)
+                    
+            elif self.device.cvp['containerName'] == 'Undefined' and not container:
+                LOGGER.log("---cannot deploy {0}; non-provisioned device with no destination container defined".format(self.device.hostname))
             else:
-                #print "APPLY CONFIGLETS"
-                CVP.applyConfiglets(self.device.sn, configlet_keys)
+                CVP.applyConfiglets(self.device.sn, configlet_keys) 
                 
         if self.singleton:
             #deal with singletons
-            name = self.template.name.upper()
-            compiled = self.template.compile({})
+            name = "{0}-{1}".format(self.template.injectSection, self.template.name)
+            name_lower = name.lower()
+            LOGGER.log('COMPILING {0}'.format(name))
+            new_configlet_content = self.template.compile({})
             assign_to = searchConfig('assign_to', self.template.injectSection)
             
-            if debug:
-                print '\n\n'+'-'*50
-                print "Assign to: "+ ','.join(assign_to)
+            if not DEBUG:
                 print '-'*50
-                print name
+                LOGGER.log("EXECUTING TASKS FOR SINGLETON {0}".format(name))
+                print '-'*50
+            else:
+                print '-'*50
+                print 'DEBUG SINGLETON OUTPUT: '+ name
+                print '-'*50
+                print "assign to: "+ ','.join(assign_to)
                 print '-'*50
                 print compiled
                 return
             
-            createdConf = CVP.addOrUpdateConfiglet(name, compiled)
-            if apply_configlets:
-                createdTasks = CVP.applyConfiglets(assign_to, createdConf) if assign_to else []
-                if createdTasks:
-                    LOGGER.log("Successfully created tasks {0}".format(','.join(map(str, createdTasks))))
-
-     
-        else:
-            #day1 undefined deployment
-            configlet_keys = []
-            for item in self.device.to_deploy:
-                name, configlet = item
+            
+            exists = searchSource(name_lower, CVP.configlets, False)
                 
-                if debug:
-                    print '\n\n'+'-'*50
-                    print name
+            
+            if not exists:
+                configlet_keys.append(CVP.createConfiglet(name, new_configlet_content)) 
+                
+            #elif not assigned:
+            #    configlet_keys.append(CVP.updateConfiglet(existing_cvp_configlet, new_configlet_content))
+            else:
+                CVP.updateConfiglet(exists, new_configlet_content)        
+            
+            if apply_configlets and assign_to and configlet_keys:
+                createdTasks = CVP.applyConfiglets(assign_to, configlet_keys) if assign_to else []
+                if createdTasks:
+                    LOGGER.log("---successfully created tasks {0}".format(','.join(map(str, createdTasks))))
+
+        #DAY1 and DAY2 EXECUTION HAPPENS HERE
+        else:
+            if not DEBUG:
+                print '-'*50
+                LOGGER.log("EXECUTING TASKS FOR DEVICE {0}/{1}".format(self.device.hostname,self.device.sn))
+                print '-'*50
+                
+            configlet_keys = []
+            
+            for name, configlet in self.device.to_deploy:
+                
+                #IF DEBUG IS ON THEN JUST PRINT TO SCREEN
+                if DEBUG:
+                    print '-'*50
+                    print 'DEBUG OUTPUT: '+ name
                     print '-'*50
                     print configlet.compile(self.device)
                     continue
                 
-                configlet_keys.append(CVP.addOrUpdateConfiglet(name, configlet.compile(self.device)))
-
-            #devices are undefined
-            if not debug and apply_configlets:
-                if self.mode == 2 and ASSIGN_TO:
-                    if self.device.cvp in ASSIGN_TO:
-                        pushToCvp()
+                #ELSE DOES IT EXIST AND ASSIGNED?
+                name_lower = name.lower()
+                
+                exists = searchSource(name_lower, CVP.configlets, False)
+                assigned = searchSource(name_lower, self.device.cvp['configlets'], False)
+                
+                LOGGER.log('COMPILING {0}'.format(name))
+                new_configlet_content = configlet.compile(self.device)
+                
+                if not exists:
+                    configlet_keys.append(CVP.createConfiglet(name, new_configlet_content)) 
+                elif not assigned:
+                    configlet_keys.append(CVP.updateConfiglet(exists, new_configlet_content))
                 else:
+                    CVP.updateConfiglet(exists, new_configlet_content)
+
+
+            #DEVICES IN ASSIGN_TO ALWAYS FOLLOW CHILD CONTAINERS
+            if not DEBUG and apply_configlets and configlet_keys:
+                if self.mode == 2:
+                    if ASSIGN_TO:
+                        if self.device.cvp in ASSIGN_TO:
+                            pushToCvp()
+                    else:
+                        pushToCvp()
+                elif self.mode == 1:
                     pushToCvp()
             
-            self.device.to_deploy = []           
+            self.device.to_deploy = []
+            
+                
 
 class Switch():
     
-    def __init__(self, params={}, cvpDevice=None, injectSection = None, implicitRole = None):
+    def __init__(self, params={}, cvpDevice={}, injectSection = None, implicitRole = None):
         #list to hold leaf compiled spine underlay interface init
         self.underlay_inject = []
         self.to_deploy = []
@@ -243,17 +298,17 @@ class Switch():
         for k, v in params.items():
             setattr(self, k, str(v).replace("|",","))
         
-            
-        self.sn = (searchSource('serialNumber', self) or searchSource('sn', self)).lower()
+        self.hostname = searchSource('hostname', self) or searchSource('hostname', cvpDevice)
+        self.sn =       searchSource('sn', self) or searchSource('serialNumber', cvpDevice)
         
-        if implicitRole == 'spine':
-            self.role = 'spine'
-        elif params is cvpDevice:
+        if implicitRole:
+            self.role = implicitRole
+        elif not params and cvpDevice:
             self.role = 'cvp_device'
         
         if cvpDevice:
             self.cvp = cvpDevice
-            LOGGER.log("Device init {0}, Role: {1}, CVP found: ({2})".format(self.sn, self.role, 'x'))
+            LOGGER.log("Device init {0}, Role: {1}, Container: {2}, CVP found: ({3})".format(self.sn, self.role, self.cvp['containerName'], 'x'))
         else:
             LOGGER.log("Device init {0}, Role: {1}, CVP found: ({2})".format(self.sn, self.role, ''))
     
@@ -268,7 +323,7 @@ class Switch():
         exception = getattr(template, "skip_device", None)
         if exception == self.sn:
             return None
-        configlet_name = "{0}-{1}-CONFIG".format(template.name.upper(), self.hostname.upper())
+        configlet_name = "{0}-{1}-{2}-CONFIG".format(self.injectSection.upper(), template.name.upper(), self.hostname.upper())
         self.to_deploy.append((configlet_name, template))
      
     def compile_configlet(self, template):
@@ -339,19 +394,19 @@ class Switch():
                     "interface" : getattr(self, "sp{0}_int".format(i)),
                     "address" : ipAddress,
                     "interface_speed" : getattr(self, "sp{0}_speed".format(i), self.searchConfig('fabric_speed')),
-                    "description" : "TO-{0}-UNDERLAY".format(self.hostname)
+                    "description" : "TO-{0}-UNDERLAY Ethernet{1}".format(self.hostname, getattr(self, "lf{0}_int".format(i)))
                 }
                 spine.underlay_inject.append(template.compile(spine_args))
                 self_args = {
                     "interface" : getattr(self, "lf{0}_int".format(i)),
                     "address" : ipAddress + 1,
                     "interface_speed" : getattr(self, "sp{0}_speed".format(i), self.searchConfig('fabric_speed')),
-                    "description" : "TO-{0}-UNDERLAY".format(spine.hostname)
+                    "description" : "TO-{0}-UNDERLAY Ethernet{1}".format(spine.hostname, getattr(self, "sp{0}_int".format(i)))
                 }
                 self.underlay_inject.append(template.compile(self_args))
                 
             except Exception as e:
-                LOGGER.log("Error building configlet section underlay for {0}<->{1}: {2}".format(spine.hostname, self.hostname, e))
+                LOGGER.log("-error building configlet section underlay for {0}<->{1}: {2}".format(spine.hostname, self.hostname, e))
                 sys.exit(0)
             
         return "\n".join(self.underlay_inject)
@@ -367,6 +422,10 @@ class Switch():
     @property
     def spine_lo0_list(self):
         return [spine.lo0 for spine in SPINES]
+    
+    @property
+    def spine_lo1_list(self):
+        return [spine.lo1 for spine in SPINES]
     
     @property
     def spine_ipv4_list(self):
@@ -528,7 +587,7 @@ class Configlet():
                     __section = __section.replace(toReplace, compiled)        
             elif _test and failedTests:
                 #there is a test but failed WIPE
-                LOGGER.log("---skipping configlet section {0} in {1}: test condition for {2} failed".format(
+                LOGGER.log("-skipping configlet section {0} in {1}: test condition for {2} failed".format(
                     _section.replace('\n','')[:15],
                     self.name,
                     ','.join(failedTests)
@@ -541,7 +600,7 @@ class Configlet():
             else:
                 #no test, iterables failed WIPE
                 for toReplace, errorKeys in errorIterables:
-                    LOGGER.log("---skipping configlet section {0} in {1}: iterations failed on {2}".format(
+                    LOGGER.log("-skipping configlet section {0} in {1}: iterations failed on {2}".format(
                         _section.replace('\n','')[:15],
                         self.name,
                         ','.join(errorKeys)
@@ -554,7 +613,7 @@ class Configlet():
         compiledIterables = self.compileIterables(source, baseTemplate)
         errorIterables = compiledIterables.pop('error')
         for toReplace, errorKeys in errorIterables:
-            LOGGER.log("---skipping configlet option {0} in {1}: variable {2} undefined".format(
+            LOGGER.log("-skipping configlet option {0} in {1}: variable {2} undefined".format(
                         toReplace.replace('\n','')[:15] + '...',
                         self.name,
                         ','.join(errorKeys)
@@ -569,7 +628,7 @@ class Configlet():
         valueDict = buildValueDict(source, baseTemplate, self.injectSection)
         errorKeys = valueDict.pop('error')
         if errorKeys:
-            LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, ','.join(errorKeys)))
+            LOGGER.log("-error building configlet {0}: global/device definition for {1} undefined".format(self.name, ','.join(errorKeys)))
             return ' '
         
         #this is to sanitize and replace invalid keys in the format function    
@@ -581,7 +640,7 @@ class Configlet():
         try:
             baseTemplate = baseTemplate.format(**dict(zip(_keys, valueDict.values())))
         except KeyError as E:
-            LOGGER.log("Error building configlet {0}: global/device definition for {1} undefined".format(self.name, E))
+            LOGGER.log("-error building configlet {0}: global/device definition for {1} undefined".format(self.name, E))
             #must return a value which passes a boolean test
             #we will usually get here if the parent configlet requires device @property functions but the 
             return ' '
@@ -681,7 +740,7 @@ def searchConfig(key, section = None):
             return None
 
     if config.startswith('[') and config.endswith(']'):
-        return [v.strip() for v in config[1:-1].split('|') if v]
+        return [v.strip() for v in config[1:-1].split(',') if v]
         
     if config == 'True':
         return True
@@ -722,8 +781,9 @@ def getKeyDefinition(key, source, section = None):
         
         if file.startswith('/') and hasattr(CVP, 'cvprac'):
             #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
-            found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
+            
             try:
+                found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
                 found = found['notifications'][0]['updates'][_key]['value']
                 __keys = found.keys()
                 if 'Value' in __keys:
@@ -799,7 +859,7 @@ def parseForMath(key):
 #used to check if tests pass while supporting section injections from the global variable space
 def buildConditionTest(keys):
     condition_list = []
-    _keys = keys.split('|')
+    _keys = keys.split('&')
     
     for key in _keys:
         key = re.split('([^a-z0-9A-Z_]+)', key)
@@ -842,6 +902,10 @@ def getByHostname(hostname):
 def buildGlobalData(injectSection = None):
     #INIT CONFIG
     loadConfig()
+    
+    global DEBUG
+    DEBUG = searchConfig('debug', injectSection)
+    
     #INIT TEMPLATES
     loadTemplates(injectSection)
     #INIT FABRIC CSV
@@ -878,8 +942,9 @@ def loadDevices(injectSection = None):
     
     mode = searchConfig('mode', injectSection)
         
-
-    if mode == 'day2':
+    _temp_vars = {}
+    
+    if mode == 'day2' and not DEBUG:
         spines = searchConfig('spines', injectSection)
         leafs = searchConfig('leafs', injectSection)
         compile_for = searchConfig('compile_for', injectSection)
@@ -887,32 +952,54 @@ def loadDevices(injectSection = None):
         
         follow_child_containers = searchConfig('follow_child_containers', injectSection)
         
+        CVP.populate()
+        
         spines = CVP.fetchDevices(spines, follow_child_containers) if spines else []
         leafs = CVP.fetchDevices(leafs, follow_child_containers) if leafs else []
         compile_for = CVP.fetchDevices(compile_for, follow_child_containers) if compile_for else []
         assign_to = CVP.fetchDevices(assign_to, follow_child_containers) if assign_to else []
         
+        switch_vars = searchConfig('switch_vars', injectSection)
+        if switch_vars:
+            with xlrd.open_workbook(switch_vars) as f:
+                sheet = f.sheet_by_index(0)
+                sheet.cell_value(0,0)
+                    
+                headers = [val.lower() for val in sheet.row_values(0)]
+    
+                #row[0] is the serial
+                #passing a dict to the switch to preserve csv headers
+                for row in range(1, sheet.nrows):
+                    sn_index = headers.index("sn")
+                    row = sheet.row_values(row)
+                    sn = row[sn_index].lower()
+                    _temp_vars[sn] = dict(zip(headers,row))
+                    
         #build the master list and label the implicit role for day2, since we don't know what's what
-        for sn, device in CVP.devices.items():
+        
+        for sn, cvp_device in CVP.devices.items():
             
             implicitRole = None
-            if device in leafs:
+            if cvp_device in leafs:
                 implicitRole = 'leaf'
-            elif device in spines:
+            elif cvp_device in spines:
                 implicitRole = 'spine'
-                
-            DEVICES[sn] = Switch(device, device, injectSection, implicitRole)
-            HOST_TO_DEVICE[DEVICES[sn].hostname.lower()] = DEVICES[sn]
+            _temp_vars_device = searchSource(sn, _temp_vars, {})
+            sn = sn.lower()
+            hostname = (searchSource('hostname', _temp_vars_device, None) or cvp_device['hostname']).lower()
+            
+            DEVICES[sn] = Switch(_temp_vars_device, cvp_device, injectSection, implicitRole)
+            HOST_TO_DEVICE[hostname] = DEVICES[sn]
             
             if implicitRole == 'spine':
                 SPINES.append(DEVICES[sn])
-            if device in compile_for:
+            if cvp_device in compile_for:
                 COMPILE_FOR.append(DEVICES[sn])
-            if device in assign_to:
+            if cvp_device in assign_to:
                 ASSIGN_TO.append(DEVICES[sn])
             
     elif mode == 'day1':
-        with xlrd.open_workbook("fabric_parameters.xls") as f:
+        with xlrd.open_workbook(searchConfig('device_source', injectSection) or "fabric_parameters.xls") as f:
             sheet = f.sheet_by_index(0)
             sheet.cell_value(0,0)
                 
