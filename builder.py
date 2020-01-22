@@ -75,7 +75,7 @@ class Cvp():
             for device in self.cvprac.api.get_inventory():
                 sn = device['serialNumber'].lower()
                 host = device['hostname'].lower()
-                LOGGER.log("-loading device configlets; please wait...")
+                LOGGER.log("-loading {0} configlets; please wait...".format(host))
                 configlets = self.cvprac.api.get_configlets_by_device_id(device['systemMacAddress'])
                 device['configlets'] = {item['name'].lower():item for item in configlets}
                 
@@ -192,7 +192,6 @@ class Task():
             
             if self.device.cvp['containerName'] == 'Undefined' and container:
                 CVP.deployDevice(self.device, container, configlet_keys)
-                    
             elif self.device.cvp['containerName'] == 'Undefined' and not container:
                 LOGGER.log("---cannot deploy {0}; non-provisioned device with no destination container defined".format(self.device.hostname))
             else:
@@ -216,18 +215,13 @@ class Task():
                 print '-'*50
                 print "assign to: "+ ','.join(assign_to)
                 print '-'*50
-                print compiled
+                print new_configlet_content
                 return
-            
             
             exists = searchSource(name_lower, CVP.configlets, False)
                 
-            
             if not exists:
                 configlet_keys.append(CVP.createConfiglet(name, new_configlet_content)) 
-                
-            #elif not assigned:
-            #    configlet_keys.append(CVP.updateConfiglet(existing_cvp_configlet, new_configlet_content))
             else:
                 CVP.updateConfiglet(exists, new_configlet_content)        
             
@@ -240,7 +234,7 @@ class Task():
         else:
             if not DEBUG:
                 print '-'*50
-                LOGGER.log("EXECUTING TASKS FOR DEVICE {0}/{1}".format(self.device.hostname,self.device.sn))
+                LOGGER.log("EXECUTING TASKS FOR DEVICE {0}/{1}".format(self.device.hostname, self.device.sn))
                 print '-'*50
                 
             configlet_keys = []
@@ -750,17 +744,33 @@ def searchConfig(key, section = None):
     return config
 
 def getKeyDefinition(key, source, section = None):
-    #order matters here
-    #this whole thing is really bad FIXIT
     csv_telemetry_source = key.split('#')
-    found = None
+    
+    file = None
     truncate = None
+    op = None
+    qty = None
+    
+    if len(csv_telemetry_source) == 2:
+        
+        file = csv_telemetry_source[0]
+        key  = csv_telemetry_source[1]
     
     math = parseForMath(key)
-    if not math:
-        key, truncate = parseForTruncation(key)[0]
+    
+    #can't truncate math op's; so either or
+    if math:
+        key, op, qty = math[0]
     else:
-        key = math[0][0]
+        key, truncate = parseForTruncation(key)[0]
+        
+    if truncate:
+        start, end = truncate[1:-1].split(':')
+        start = int(start) if start else None
+        end = int(end) if end else None
+    else:
+        start = None
+        end = None
     
     def truncateValues(values, start = None, end = None):
         if type(values) == list:
@@ -768,37 +778,34 @@ def getKeyDefinition(key, source, section = None):
         else:
             return str(values)[start:end]
 
-    if len(csv_telemetry_source) == 2:
-        
-        file = csv_telemetry_source[0]
-        _key = csv_telemetry_source[1]
-        
-        math = parseForMath(_key)
-        if not math:
-            _key, truncate = parseForTruncation(_key)[0]
-        else:
-            _key = math[0][0]
-        
+    def fetchTelemOrFileData(file, key):
         if file.startswith('/') and hasattr(CVP, 'cvprac'):
             #this is super hacked need a telemetry Data Model parser. cvp-connector has one but in js
             
             try:
                 found = CVP.cvprac.get('/api/v1/rest/' + searchSource('sn', source, '').upper() + file)
-                found = found['notifications'][0]['updates'][_key]['value']
-                __keys = found.keys()
-                if 'Value' in __keys:
-                    found = found['Value']
-                elif 'value' in __keys:
-                    found = found['value']
-                _type, val = found.items()[0]
-                found = val
+                found = found['notifications'][0]['updates'][key]['value']
+                if type(found) == dict:
+                    __keys = found.keys()
+                    if 'Value' in __keys:
+                        found = found['Value']
+                    elif 'value' in __keys:
+                        found = found['value']
+                    _type, val = found.items()[0]
+                    return val
+                else:
+                    return found
             except:
-                pass
+                LOGGER.log("-failed to properly fetch/decode telemetry data")
+                return None
         else:
             global SUPPLEMENT_FILES
+            
             try:
-                found = SUPPLEMENT_FILES[file][_key]
+                return SUPPLEMENT_FILES[file][key]
             except KeyError:
+                pass
+            try:
                 with xlrd.open_workbook(file+'.xls') as f:
                     sheet = f.sheet_by_index(0)
                     sheet.cell_value(0,0)
@@ -808,37 +815,26 @@ def getKeyDefinition(key, source, section = None):
                         col = sheet.col_values(col)
                         col = [int(v) if type(v) == float else v for v in col]
                         SUPPLEMENT_FILES[file][col[0]] = col[1:]
-                found = SUPPLEMENT_FILES[file][_key]
-
-    if truncate:
-        start, end = truncate[1:-1].split(':')
-        start = int(start) if start else None
-        end = int(end) if end else None
-    else:
-        start, end = (None, None)
-    
-    if math:
-        if found:
-            key = found
-        else:
-            if math[0][0].isdigit():
-                key = math[0][0]
-            else:
-                key = searchSource(math[0][0], source) or searchConfig(math[0][0], section)
-                if key == 'ERROR' or not key:
-                    key = None                
-                
-        op, qty = math[0][1:]
-        return (key, op, qty)
-    else:
-        if found:
-            return truncateValues(found, start, end)
-        else:
-            toReturn = searchSource(key, source) or searchConfig(key, section)
-            if toReturn == 'ERROR' or not toReturn:
+                return SUPPLEMENT_FILES[file][key]
+            except:
                 return None
-            else:
-                return truncateValues(toReturn, start, end)
+    
+    if file:
+        toReturn = fetchTelemOrFileData(file, key)
+    elif key.isdigit():
+        toReturn = key
+    else:
+        toReturn = searchSource(key, source) or searchConfig(key, section)
+        if toReturn == 'ERROR' or not toReturn:
+            toReturn = None
+            
+    if math:
+        return (toReturn, op, qty)
+    elif truncate:
+        return truncateValues(toReturn, start, end)
+    else:
+        return toReturn
+
 
 def parseForRequiredKeys(template):
     return re.findall('{(.*?)}', template)
@@ -944,7 +940,7 @@ def loadDevices(injectSection = None):
         
     _temp_vars = {}
     
-    if mode == 'day2' and not DEBUG:
+    if mode == 'day2':
         spines = searchConfig('spines', injectSection)
         leafs = searchConfig('leafs', injectSection)
         compile_for = searchConfig('compile_for', injectSection)
