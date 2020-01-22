@@ -10,6 +10,7 @@ pip install urllib3
 pip install xlrd
 pip install git+https://github.com/aristanetworks/cvprac.git@develop
 pip install git+https://github.com/romecode/Arista-CVP-Fabric-Builder.git
+pip install configparser
 ```
 
 This tool is a complete day1/day2 Arista CVP solution for compiling configlets from templates, creating and assigning them in CVP, and appending new config.

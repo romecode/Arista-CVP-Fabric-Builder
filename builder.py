@@ -1,6 +1,6 @@
 import cmd
 import csv
-from ConfigParser import SafeConfigParser
+from backports.configparser import ConfigParser
 import urllib3
 import re
 from ipaddress import ip_address
@@ -52,7 +52,7 @@ class Cvp():
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # to supress the warnings for https
             self.cvprac.connect([searchConfig('cvp_server')], searchConfig('cvp_user'), searchConfig('cvp_pass'))
             LOGGER.log("Successfully authenticated to CVP")
-        except (ImportError, self.CvpClientError), e:
+        except (ImportError, self.CvpClientError) as e:
             LOGGER.log("Unable to Init CVP; forcing debug mode")
             LOGGER.log("ERROR: {0}".format(e))
             global DEBUG
@@ -112,7 +112,7 @@ class Cvp():
                     continue
                 else:
                     devices.append(CVP.getContainerDevices(_search, follow_child_containers))
-            except KeyError as E:
+            except KeyError as e:
                 LOGGER.log("Could not find {0}".format(_search))
         return list(chain.from_iterable(devices))
     
@@ -135,7 +135,7 @@ class Cvp():
     def deployDevice(self, device, container, configlets_to_deploy):
         try:
             ids = self.cvprac.api.deploy_device(device.cvp, container, configlets_to_deploy)
-        except self.CvpApiError as err:
+        except self.CvpApiError as e:
             LOGGER.log("---deploying device {0}: failed, could not get task id from CVP".format(device.hostname))
         else:
             ids = ','.join(map(str, ids['data']['taskIds']))
@@ -206,16 +206,16 @@ class Task():
             assign_to = searchConfig('assign_to', self.template.injectSection)
             
             if not DEBUG:
-                print '-'*50
+                print('-'*50)
                 LOGGER.log("EXECUTING TASKS FOR SINGLETON {0}".format(name))
-                print '-'*50
+                print('-'*50)
             else:
-                print '-'*50
-                print 'DEBUG SINGLETON OUTPUT: '+ name
-                print '-'*50
-                print "assign to: "+ ','.join(assign_to)
-                print '-'*50
-                print new_configlet_content
+                print('-'*50)
+                print('DEBUG SINGLETON OUTPUT: '+ name)
+                print('-'*50)
+                print("assign to: "+ ','.join(assign_to))
+                print('-'*50)
+                print(new_configlet_content)
                 return
             
             exists = searchSource(name_lower, CVP.configlets, False)
@@ -233,9 +233,9 @@ class Task():
         #DAY1 and DAY2 EXECUTION HAPPENS HERE
         else:
             if not DEBUG:
-                print '-'*50
+                print('-'*50)
                 LOGGER.log("EXECUTING TASKS FOR DEVICE {0}/{1}".format(self.device.hostname, self.device.sn))
-                print '-'*50
+                print('-'*50)
                 
             configlet_keys = []
             
@@ -243,10 +243,10 @@ class Task():
                 
                 #IF DEBUG IS ON THEN JUST PRINT TO SCREEN
                 if DEBUG:
-                    print '-'*50
-                    print 'DEBUG OUTPUT: '+ name
-                    print '-'*50
-                    print configlet.compile(self.device)
+                    print('-'*50)
+                    print('DEBUG OUTPUT: '+ name)
+                    print('-'*50)
+                    print(configlet.compile(self.device))
                     continue
                 
                 #ELSE DOES IT EXIST AND ASSIGNED?
@@ -540,7 +540,7 @@ class Configlet():
                         else:
                             #no lists were found return once
                             compiled[template] = _template.format(**dict(zip(_keys, [function(value) for value, function in values_and_getters])))    
-                    except StopIteration:
+                    except StopIteration as e:
                         compiled[template] = '\n'.join(_compiled)
                     
                     if i == 0:
@@ -633,8 +633,8 @@ class Configlet():
             _keys.append(i)
         try:
             baseTemplate = baseTemplate.format(**dict(zip(_keys, valueDict.values())))
-        except KeyError as E:
-            LOGGER.log("-error building configlet {0}: global/device definition for {1} undefined".format(self.name, E))
+        except KeyError as e:
+            LOGGER.log("-error building configlet {0}: global/device definition for {1} undefined".format(self.name, e))
             #must return a value which passes a boolean test
             #we will usually get here if the parent configlet requires device @property functions but the 
             return ' '
@@ -691,7 +691,7 @@ class FabricBuilder(cmd.Cmd):
     prompt = 'builder>'
     
     def help_deploy(self):
-        print 'Use deploy NAME where NAME is the user-defined section with a defined recipe.'
+        print('Use deploy NAME where NAME is the user-defined section with a defined recipe.')
     
     #check recipe syntax and variables
     def do_deploy(self, section):
@@ -803,7 +803,7 @@ def getKeyDefinition(key, source, section = None):
             
             try:
                 return SUPPLEMENT_FILES[file][key]
-            except KeyError:
+            except KeyError as e:
                 pass
             try:
                 with xlrd.open_workbook(file+'.xls') as f:
@@ -910,13 +910,13 @@ def buildGlobalData(injectSection = None):
 def loadConfig():
     global CONFIG
     CONFIG = {} 
-    CONFIG = SafeConfigParser()
+    CONFIG = ConfigParser()
     CONFIG.read('global.conf')
     
 def loadTemplates(injectSection = None):
     global TEMPLATES
     TEMPLATES = {}
-    parser = SafeConfigParser()
+    parser = ConfigParser()
     parser.read('templates.conf')
     for sectionName in parser.sections():
         TEMPLATES[sectionName] = Configlet(sectionName, dict(parser.items(sectionName)), injectSection)
@@ -1038,5 +1038,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-        
-        
